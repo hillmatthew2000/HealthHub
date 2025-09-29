@@ -13,15 +13,17 @@
 
 ## 📋 Table of Contents
 
-- [Quick Start](#quick-start)
-- [Project Structure](#project-structure)
-- [Development Setup](#development-setup)
-- [Deployment](#deployment)
-- [API Documentation](#api-documentation)
-- [Security](#security)
-- [Monitoring](#monitoring)
-- [Contributing](#contributing)
-- [License](#license)
+- [🚀 Quick Start](#-quick-start)
+- [📁 Project Structure](#-project-structure)
+- [🛠 Development Setup](#-development-setup)
+- [🚀 Deployment](#-deployment)
+- [📖 API Documentation](#-api-documentation)
+- [🔒 Security](#-security)
+- [📊 Monitoring](#-monitoring)
+- [🧪 Testing](#-testing)
+- [🤝 Contributing](#-contributing)
+- [🆘 Support](#-support)
+- [📄 License](#-license)
 
 ## 🚀 Quick Start
 
