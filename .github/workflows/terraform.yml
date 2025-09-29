@@ -1,0 +1,344 @@
+name: Infrastructure Management
+
+on:
+  push:
+    branches: [main]
+    paths: 
+      - 'deployments/terraform/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'deployments/terraform/**'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+        - dev
+        - staging
+        - prod
+      action:
+        description: 'Terraform action'
+        required: true
+        default: 'plan'
+        type: choice
+        options:
+        - plan
+        - apply
+        - destroy
+
+env:
+  AWS_REGION: us-west-2
+  TF_VERSION: 1.6.0
+
+jobs:
+  terraform-validate:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ env.TF_VERSION }}
+
+    - name: Terraform Format Check
+      run: |
+        cd deployments/terraform/aws
+        terraform fmt -check -recursive
+
+    - name: Terraform Init
+      run: |
+        cd deployments/terraform/aws
+        terraform init -backend=false
+
+    - name: Terraform Validate
+      run: |
+        cd deployments/terraform/aws
+        terraform validate
+
+    - name: Run tfsec security scan
+      uses: aquasecurity/tfsec-action@v1.0.3
+      with:
+        working_directory: deployments/terraform/aws
+
+  terraform-plan-dev:
+    runs-on: ubuntu-latest
+    needs: terraform-validate
+    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'dev')
+    environment: development
+
+    defaults:
+      run:
+        working-directory: deployments/terraform/aws
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ env.TF_VERSION }}
+
+    - name: Terraform Init
+      run: |
+        terraform init \
+          -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+          -backend-config="key=healthcare-api/dev/terraform.tfstate" \
+          -backend-config="region=${{ env.AWS_REGION }}" \
+          -backend-config="encrypt=true" \
+          -backend-config="dynamodb_table=${{ secrets.TF_LOCK_TABLE }}"
+
+    - name: Terraform Plan
+      id: plan
+      run: |
+        terraform plan \
+          -var="environment=dev" \
+          -var="aws_region=${{ env.AWS_REGION }}" \
+          -var="owner=${{ github.actor }}" \
+          -out=tfplan \
+          -no-color
+
+    - name: Comment PR with plan
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const output = `#### Terraform Plan 📖\`dev\`
+          
+          <details><summary>Show Plan</summary>
+          
+          \`\`\`terraform
+          ${{ steps.plan.outputs.stdout }}
+          \`\`\`
+          
+          </details>
+          
+          *Pusher: @${{ github.actor }}, Action: \`${{ github.event_name }}\`*`;
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: output
+          })
+
+    - name: Save plan artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: tfplan-dev
+        path: deployments/terraform/aws/tfplan
+
+  terraform-apply-dev:
+    runs-on: ubuntu-latest
+    needs: terraform-plan-dev
+    if: github.ref == 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply' && github.event.inputs.environment == 'dev')
+    environment: development
+
+    defaults:
+      run:
+        working-directory: deployments/terraform/aws
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ env.TF_VERSION }}
+
+    - name: Download plan artifact
+      uses: actions/download-artifact@v3
+      with:
+        name: tfplan-dev
+        path: deployments/terraform/aws/
+
+    - name: Terraform Init
+      run: |
+        terraform init \
+          -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+          -backend-config="key=healthcare-api/dev/terraform.tfstate" \
+          -backend-config="region=${{ env.AWS_REGION }}" \
+          -backend-config="encrypt=true" \
+          -backend-config="dynamodb_table=${{ secrets.TF_LOCK_TABLE }}"
+
+    - name: Terraform Apply
+      run: terraform apply -auto-approve tfplan
+
+    - name: Save Terraform outputs
+      id: outputs
+      run: |
+        echo "cluster_endpoint=$(terraform output -raw cluster_endpoint)" >> $GITHUB_OUTPUT
+        echo "ecr_repository_url=$(terraform output -raw ecr_repository_url)" >> $GITHUB_OUTPUT
+
+  terraform-plan-prod:
+    runs-on: ubuntu-latest
+    needs: terraform-validate
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'prod'
+    environment: production
+
+    defaults:
+      run:
+        working-directory: deployments/terraform/aws
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_PROD }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_PROD }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ env.TF_VERSION }}
+
+    - name: Terraform Init
+      run: |
+        terraform init \
+          -backend-config="bucket=${{ secrets.TF_STATE_BUCKET_PROD }}" \
+          -backend-config="key=healthcare-api/prod/terraform.tfstate" \
+          -backend-config="region=${{ env.AWS_REGION }}" \
+          -backend-config="encrypt=true" \
+          -backend-config="dynamodb_table=${{ secrets.TF_LOCK_TABLE_PROD }}"
+
+    - name: Terraform Plan
+      run: |
+        terraform plan \
+          -var="environment=prod" \
+          -var="aws_region=${{ env.AWS_REGION }}" \
+          -var="owner=${{ github.actor }}" \
+          -var="enable_waf=true" \
+          -var="enable_cloudtrail=true" \
+          -var="enable_guardduty=true" \
+          -var="enable_backups=true" \
+          -var="db_deletion_protection=true" \
+          -out=tfplan-prod
+
+    - name: Save plan artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: tfplan-prod
+        path: deployments/terraform/aws/tfplan-prod
+
+  terraform-apply-prod:
+    runs-on: ubuntu-latest
+    needs: terraform-plan-prod
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply' && github.event.inputs.environment == 'prod'
+    environment: production
+
+    defaults:
+      run:
+        working-directory: deployments/terraform/aws
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_PROD }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_PROD }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ env.TF_VERSION }}
+
+    - name: Download plan artifact
+      uses: actions/download-artifact@v3
+      with:
+        name: tfplan-prod
+        path: deployments/terraform/aws/
+
+    - name: Terraform Init
+      run: |
+        terraform init \
+          -backend-config="bucket=${{ secrets.TF_STATE_BUCKET_PROD }}" \
+          -backend-config="key=healthcare-api/prod/terraform.tfstate" \
+          -backend-config="region=${{ env.AWS_REGION }}" \
+          -backend-config="encrypt=true" \
+          -backend-config="dynamodb_table=${{ secrets.TF_LOCK_TABLE_PROD }}"
+
+    - name: Terraform Apply
+      run: terraform apply -auto-approve tfplan-prod
+
+    - name: Notify Slack
+      uses: 8398a7/action-slack@v3
+      with:
+        status: ${{ job.status }}
+        channel: '#infrastructure'
+        webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+        text: |
+          Production infrastructure deployment completed!
+          Environment: ${{ github.event.inputs.environment }}
+          Action: ${{ github.event.inputs.action }}
+          Actor: ${{ github.actor }}
+      if: always()
+
+  terraform-destroy:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy'
+    environment: ${{ github.event.inputs.environment }}
+
+    defaults:
+      run:
+        working-directory: deployments/terraform/aws
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ env.TF_VERSION }}
+
+    - name: Terraform Init
+      run: |
+        terraform init \
+          -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+          -backend-config="key=healthcare-api/${{ github.event.inputs.environment }}/terraform.tfstate" \
+          -backend-config="region=${{ env.AWS_REGION }}" \
+          -backend-config="encrypt=true" \
+          -backend-config="dynamodb_table=${{ secrets.TF_LOCK_TABLE }}"
+
+    - name: Terraform Destroy
+      run: |
+        terraform destroy \
+          -var="environment=${{ github.event.inputs.environment }}" \
+          -var="aws_region=${{ env.AWS_REGION }}" \
+          -auto-approve
