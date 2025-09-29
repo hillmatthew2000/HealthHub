@@ -1,0 +1,1386 @@
+openapi: 3.0.3
+info:
+  title: Healthcare API
+  description: |
+    A comprehensive healthcare-focused RESTful API that allows for creating, reading, updating, and deleting patient records, including demographics and lab results.
+    
+    This API follows FHIR R4 standards and provides secure access to healthcare data with role-based access control, encryption, and audit logging.
+    
+    ## Features
+    - FHIR R4 compliant data models
+    - JWT-based authentication
+    - Role-based access control (RBAC)
+    - AES-256 encryption for sensitive data
+    - Comprehensive audit logging
+    - Prometheus metrics integration
+    - Health check endpoints for monitoring
+    
+    ## Security
+    All endpoints (except authentication and health checks) require a valid JWT token in the Authorization header:
+    ```
+    Authorization: Bearer <your-jwt-token>
+    ```
+    
+    ## Rate Limiting
+    The API implements rate limiting to prevent abuse:
+    - 100 requests per minute per IP address
+    - 1000 requests per hour per authenticated user
+    
+    ## Data Compliance
+    This API is designed with healthcare data compliance in mind:
+    - All data is encrypted at rest and in transit
+    - Audit logs are maintained for all data access
+    - User access is controlled via RBAC
+    - PHI data is handled according to HIPAA guidelines
+    
+  version: 1.0.0
+  contact:
+    name: Healthcare API Support
+    email: support@healthcareapi.com
+    url: https://docs.healthcareapi.com
+  license:
+    name: MIT License
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: https://api.healthcareapi.com/api/v1
+    description: Production server
+  - url: https://api-staging.healthcareapi.com/api/v1
+    description: Staging server
+  - url: http://localhost:8080/api/v1
+    description: Development server
+
+tags:
+  - name: Authentication
+    description: User authentication and authorization
+  - name: Patients
+    description: Patient management operations
+  - name: Observations
+    description: Clinical observation and lab result management
+  - name: Health
+    description: API health and monitoring endpoints
+
+paths:
+  # Authentication Endpoints
+  /auth/login:
+    post:
+      tags:
+        - Authentication
+      summary: User login
+      description: Authenticate a user and receive a JWT token
+      operationId: login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - email
+                - password
+              properties:
+                email:
+                  type: string
+                  format: email
+                  example: "doctor@hospital.com"
+                password:
+                  type: string
+                  format: password
+                  example: "securePassword123"
+      responses:
+        '200':
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  access_token:
+                    type: string
+                    description: JWT access token
+                  refresh_token:
+                    type: string
+                    description: JWT refresh token
+                  expires_in:
+                    type: integer
+                    description: Token expiration time in seconds
+                  user:
+                    $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /auth/register:
+    post:
+      tags:
+        - Authentication
+      summary: User registration
+      description: Register a new user account
+      operationId: register
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - email
+                - password
+                - first_name
+                - last_name
+                - role
+              properties:
+                email:
+                  type: string
+                  format: email
+                  example: "nurse@hospital.com"
+                password:
+                  type: string
+                  format: password
+                  minLength: 8
+                  example: "securePassword123"
+                first_name:
+                  type: string
+                  example: "Jane"
+                last_name:
+                  type: string
+                  example: "Smith"
+                role:
+                  type: string
+                  enum: [doctor, nurse, admin, patient]
+                  example: "nurse"
+      responses:
+        '201':
+          description: User created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: User already exists
+
+  /auth/refresh:
+    post:
+      tags:
+        - Authentication
+      summary: Refresh access token
+      description: Get a new access token using a refresh token
+      operationId: refreshToken
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - refresh_token
+              properties:
+                refresh_token:
+                  type: string
+                  description: Valid refresh token
+      responses:
+        '200':
+          description: Token refreshed successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  access_token:
+                    type: string
+                  expires_in:
+                    type: integer
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /auth/logout:
+    post:
+      tags:
+        - Authentication
+      summary: User logout
+      description: Invalidate the current access token
+      operationId: logout
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Logout successful
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # Patient Endpoints
+  /patients:
+    get:
+      tags:
+        - Patients
+      summary: Get patients
+      description: Retrieve a list of patients with optional filtering and pagination
+      operationId: getPatients
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: page
+          in: query
+          description: Page number for pagination
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: limit
+          in: query
+          description: Number of items per page
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: search
+          in: query
+          description: Search term for patient name or identifier
+          schema:
+            type: string
+        - name: gender
+          in: query
+          description: Filter by patient gender
+          schema:
+            type: string
+            enum: [male, female, other, unknown]
+        - name: birth_date_from
+          in: query
+          description: Filter patients born after this date
+          schema:
+            type: string
+            format: date
+        - name: birth_date_to
+          in: query
+          description: Filter patients born before this date
+          schema:
+            type: string
+            format: date
+      responses:
+        '200':
+          description: Patients retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Patient'
+                  pagination:
+                    $ref: '#/components/schemas/Pagination'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+    post:
+      tags:
+        - Patients
+      summary: Create patient
+      description: Create a new patient record
+      operationId: createPatient
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatientCreate'
+      responses:
+        '201':
+          description: Patient created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Patient'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /patients/{id}:
+    get:
+      tags:
+        - Patients
+      summary: Get patient by ID
+      description: Retrieve a specific patient by their ID
+      operationId: getPatient
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Patient ID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Patient retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Patient'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+    put:
+      tags:
+        - Patients
+      summary: Update patient
+      description: Update an existing patient record
+      operationId: updatePatient
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Patient ID
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatientUpdate'
+      responses:
+        '200':
+          description: Patient updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Patient'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+    delete:
+      tags:
+        - Patients
+      summary: Delete patient
+      description: Delete a patient record (soft delete - archives the record)
+      operationId: deletePatient
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Patient ID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Patient deleted successfully
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  # Observation Endpoints
+  /observations:
+    get:
+      tags:
+        - Observations
+      summary: Get observations
+      description: Retrieve a list of clinical observations with optional filtering and pagination
+      operationId: getObservations
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: page
+          in: query
+          description: Page number for pagination
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: limit
+          in: query
+          description: Number of items per page
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: patient_id
+          in: query
+          description: Filter observations by patient ID
+          schema:
+            type: string
+            format: uuid
+        - name: code
+          in: query
+          description: Filter by observation code
+          schema:
+            type: string
+        - name: category
+          in: query
+          description: Filter by observation category
+          schema:
+            type: string
+        - name: status
+          in: query
+          description: Filter by observation status
+          schema:
+            type: string
+            enum: [registered, preliminary, final, amended, corrected, cancelled, entered-in-error, unknown]
+        - name: effective_date_from
+          in: query
+          description: Filter observations after this date
+          schema:
+            type: string
+            format: date-time
+        - name: effective_date_to
+          in: query
+          description: Filter observations before this date
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: Observations retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Observation'
+                  pagination:
+                    $ref: '#/components/schemas/Pagination'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+    post:
+      tags:
+        - Observations
+      summary: Create observation
+      description: Create a new clinical observation record
+      operationId: createObservation
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ObservationCreate'
+      responses:
+        '201':
+          description: Observation created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Observation'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /observations/{id}:
+    get:
+      tags:
+        - Observations
+      summary: Get observation by ID
+      description: Retrieve a specific observation by its ID
+      operationId: getObservation
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Observation ID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Observation retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Observation'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+    put:
+      tags:
+        - Observations
+      summary: Update observation
+      description: Update an existing observation record
+      operationId: updateObservation
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Observation ID
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ObservationUpdate'
+      responses:
+        '200':
+          description: Observation updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Observation'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+    delete:
+      tags:
+        - Observations
+      summary: Delete observation
+      description: Delete an observation record (soft delete - archives the record)
+      operationId: deleteObservation
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Observation ID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Observation deleted successfully
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  # Health Check Endpoints
+  /health:
+    get:
+      tags:
+        - Health
+      summary: Basic health check
+      description: Check if the API is running
+      operationId: healthCheck
+      responses:
+        '200':
+          description: API is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthStatus'
+
+  /health/ready:
+    get:
+      tags:
+        - Health
+      summary: Readiness check
+      description: Check if the API is ready to serve requests (includes database connectivity)
+      operationId: readinessCheck
+      responses:
+        '200':
+          description: API is ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthStatus'
+        '503':
+          description: API is not ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthStatus'
+
+  /health/live:
+    get:
+      tags:
+        - Health
+      summary: Liveness check
+      description: Check if the API is alive (for Kubernetes liveness probe)
+      operationId: livenessCheck
+      responses:
+        '200':
+          description: API is alive
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthStatus'
+
+  /metrics:
+    get:
+      tags:
+        - Health
+      summary: Prometheus metrics
+      description: Get Prometheus metrics for monitoring
+      operationId: getMetrics
+      responses:
+        '200':
+          description: Metrics retrieved successfully
+          content:
+            text/plain:
+              schema:
+                type: string
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: User ID
+        email:
+          type: string
+          format: email
+          description: User email address
+        first_name:
+          type: string
+          description: User's first name
+        last_name:
+          type: string
+          description: User's last name
+        roles:
+          type: array
+          items:
+            type: string
+          description: User's assigned roles
+        created_at:
+          type: string
+          format: date-time
+          description: User creation timestamp
+        updated_at:
+          type: string
+          format: date-time
+          description: User last update timestamp
+
+    Patient:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Patient ID
+        active:
+          type: boolean
+          description: Whether the patient record is active
+        identifier:
+          type: array
+          items:
+            $ref: '#/components/schemas/Identifier'
+          description: Patient identifiers (MRN, SSN, etc.)
+        name:
+          type: array
+          items:
+            $ref: '#/components/schemas/HumanName'
+          description: Patient names
+        telecom:
+          type: array
+          items:
+            $ref: '#/components/schemas/ContactPoint'
+          description: Contact information
+        gender:
+          type: string
+          enum: [male, female, other, unknown]
+          description: Patient gender
+        birth_date:
+          type: string
+          format: date
+          description: Patient birth date
+        deceased_boolean:
+          type: boolean
+          description: Whether the patient is deceased
+        address:
+          type: array
+          items:
+            $ref: '#/components/schemas/Address'
+          description: Patient addresses
+        marital_status:
+          $ref: '#/components/schemas/CodeableConcept'
+        contact:
+          type: array
+          items:
+            $ref: '#/components/schemas/PatientContact'
+          description: Emergency contacts
+        communication:
+          type: array
+          items:
+            $ref: '#/components/schemas/PatientCommunication'
+          description: Language preferences
+        managing_organization:
+          $ref: '#/components/schemas/Reference'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    PatientCreate:
+      type: object
+      required:
+        - name
+        - gender
+      properties:
+        active:
+          type: boolean
+          default: true
+        identifier:
+          type: array
+          items:
+            $ref: '#/components/schemas/Identifier'
+        name:
+          type: array
+          items:
+            $ref: '#/components/schemas/HumanName'
+          minItems: 1
+        telecom:
+          type: array
+          items:
+            $ref: '#/components/schemas/ContactPoint'
+        gender:
+          type: string
+          enum: [male, female, other, unknown]
+        birth_date:
+          type: string
+          format: date
+        address:
+          type: array
+          items:
+            $ref: '#/components/schemas/Address'
+        marital_status:
+          $ref: '#/components/schemas/CodeableConcept'
+        contact:
+          type: array
+          items:
+            $ref: '#/components/schemas/PatientContact'
+
+    PatientUpdate:
+      type: object
+      properties:
+        active:
+          type: boolean
+        identifier:
+          type: array
+          items:
+            $ref: '#/components/schemas/Identifier'
+        name:
+          type: array
+          items:
+            $ref: '#/components/schemas/HumanName'
+        telecom:
+          type: array
+          items:
+            $ref: '#/components/schemas/ContactPoint'
+        gender:
+          type: string
+          enum: [male, female, other, unknown]
+        birth_date:
+          type: string
+          format: date
+        address:
+          type: array
+          items:
+            $ref: '#/components/schemas/Address'
+        marital_status:
+          $ref: '#/components/schemas/CodeableConcept'
+        contact:
+          type: array
+          items:
+            $ref: '#/components/schemas/PatientContact'
+
+    Observation:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Observation ID
+        identifier:
+          type: array
+          items:
+            $ref: '#/components/schemas/Identifier'
+          description: Observation identifiers
+        status:
+          type: string
+          enum: [registered, preliminary, final, amended, corrected, cancelled, entered-in-error, unknown]
+          description: Observation status
+        category:
+          type: array
+          items:
+            $ref: '#/components/schemas/CodeableConcept'
+          description: Observation categories
+        code:
+          $ref: '#/components/schemas/CodeableConcept'
+        subject:
+          $ref: '#/components/schemas/Reference'
+        encounter:
+          $ref: '#/components/schemas/Reference'
+        effective_date_time:
+          type: string
+          format: date-time
+          description: When observation was taken
+        issued:
+          type: string
+          format: date-time
+          description: When observation was published
+        performer:
+          type: array
+          items:
+            $ref: '#/components/schemas/Reference'
+          description: Who performed the observation
+        value_quantity:
+          $ref: '#/components/schemas/Quantity'
+        value_string:
+          type: string
+          description: Observation value as string
+        value_boolean:
+          type: boolean
+          description: Observation value as boolean
+        interpretation:
+          type: array
+          items:
+            $ref: '#/components/schemas/CodeableConcept'
+          description: High, low, normal, etc.
+        note:
+          type: array
+          items:
+            $ref: '#/components/schemas/Annotation'
+          description: Comments about the observation
+        reference_range:
+          type: array
+          items:
+            $ref: '#/components/schemas/ObservationReferenceRange'
+          description: Normal range for the observation
+        component:
+          type: array
+          items:
+            $ref: '#/components/schemas/ObservationComponent'
+          description: Component observations
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    ObservationCreate:
+      type: object
+      required:
+        - status
+        - code
+        - subject
+      properties:
+        identifier:
+          type: array
+          items:
+            $ref: '#/components/schemas/Identifier'
+        status:
+          type: string
+          enum: [registered, preliminary, final, amended, corrected, cancelled, entered-in-error, unknown]
+        category:
+          type: array
+          items:
+            $ref: '#/components/schemas/CodeableConcept'
+        code:
+          $ref: '#/components/schemas/CodeableConcept'
+        subject:
+          $ref: '#/components/schemas/Reference'
+        encounter:
+          $ref: '#/components/schemas/Reference'
+        effective_date_time:
+          type: string
+          format: date-time
+        performer:
+          type: array
+          items:
+            $ref: '#/components/schemas/Reference'
+        value_quantity:
+          $ref: '#/components/schemas/Quantity'
+        value_string:
+          type: string
+        value_boolean:
+          type: boolean
+        interpretation:
+          type: array
+          items:
+            $ref: '#/components/schemas/CodeableConcept'
+        note:
+          type: array
+          items:
+            $ref: '#/components/schemas/Annotation'
+        reference_range:
+          type: array
+          items:
+            $ref: '#/components/schemas/ObservationReferenceRange'
+        component:
+          type: array
+          items:
+            $ref: '#/components/schemas/ObservationComponent'
+
+    ObservationUpdate:
+      type: object
+      properties:
+        identifier:
+          type: array
+          items:
+            $ref: '#/components/schemas/Identifier'
+        status:
+          type: string
+          enum: [registered, preliminary, final, amended, corrected, cancelled, entered-in-error, unknown]
+        category:
+          type: array
+          items:
+            $ref: '#/components/schemas/CodeableConcept'
+        code:
+          $ref: '#/components/schemas/CodeableConcept'
+        effective_date_time:
+          type: string
+          format: date-time
+        performer:
+          type: array
+          items:
+            $ref: '#/components/schemas/Reference'
+        value_quantity:
+          $ref: '#/components/schemas/Quantity'
+        value_string:
+          type: string
+        value_boolean:
+          type: boolean
+        interpretation:
+          type: array
+          items:
+            $ref: '#/components/schemas/CodeableConcept'
+        note:
+          type: array
+          items:
+            $ref: '#/components/schemas/Annotation'
+        reference_range:
+          type: array
+          items:
+            $ref: '#/components/schemas/ObservationReferenceRange'
+        component:
+          type: array
+          items:
+            $ref: '#/components/schemas/ObservationComponent'
+
+    # Common FHIR Data Types
+    HumanName:
+      type: object
+      properties:
+        use:
+          type: string
+          enum: [usual, official, temp, nickname, anonymous, old, maiden]
+        text:
+          type: string
+          description: Text representation of the full name
+        family:
+          type: string
+          description: Family name (surname)
+        given:
+          type: array
+          items:
+            type: string
+          description: Given names (first, middle names)
+        prefix:
+          type: array
+          items:
+            type: string
+          description: Name prefixes (Mr., Dr., etc.)
+        suffix:
+          type: array
+          items:
+            type: string
+          description: Name suffixes (Jr., Sr., etc.)
+
+    ContactPoint:
+      type: object
+      properties:
+        system:
+          type: string
+          enum: [phone, fax, email, pager, url, sms, other]
+        value:
+          type: string
+          description: The actual contact point
+        use:
+          type: string
+          enum: [home, work, temp, old, mobile]
+        rank:
+          type: integer
+          description: Preference order (1 = highest)
+
+    Address:
+      type: object
+      properties:
+        use:
+          type: string
+          enum: [home, work, temp, old, billing]
+        type:
+          type: string
+          enum: [postal, physical, both]
+        text:
+          type: string
+          description: Text representation of the address
+        line:
+          type: array
+          items:
+            type: string
+          description: Street address lines
+        city:
+          type: string
+          description: City name
+        district:
+          type: string
+          description: District/county
+        state:
+          type: string
+          description: State/province
+        postal_code:
+          type: string
+          description: Postal/ZIP code
+        country:
+          type: string
+          description: Country
+
+    Identifier:
+      type: object
+      properties:
+        use:
+          type: string
+          enum: [usual, official, temp, secondary, old]
+        type:
+          $ref: '#/components/schemas/CodeableConcept'
+        system:
+          type: string
+          description: The namespace for the identifier
+        value:
+          type: string
+          description: The value of the identifier
+
+    CodeableConcept:
+      type: object
+      properties:
+        coding:
+          type: array
+          items:
+            $ref: '#/components/schemas/Coding'
+          description: Code defined by a terminology system
+        text:
+          type: string
+          description: Plain text representation
+
+    Coding:
+      type: object
+      properties:
+        system:
+          type: string
+          description: Identity of the terminology system
+        version:
+          type: string
+          description: Version of the system
+        code:
+          type: string
+          description: Symbol in syntax defined by the system
+        display:
+          type: string
+          description: Representation defined by the system
+
+    Reference:
+      type: object
+      properties:
+        reference:
+          type: string
+          description: Literal reference, relative, internal or absolute URL
+        type:
+          type: string
+          description: Type the reference refers to
+        identifier:
+          $ref: '#/components/schemas/Identifier'
+        display:
+          type: string
+          description: Text alternative for the resource
+
+    Quantity:
+      type: object
+      properties:
+        value:
+          type: number
+          description: Numerical value
+        comparator:
+          type: string
+          enum: ['<', '<=', '>=', '>']
+          description: How to compare the value
+        unit:
+          type: string
+          description: Unit representation
+        system:
+          type: string
+          description: System that defines coded unit form
+        code:
+          type: string
+          description: Coded form of the unit
+
+    Annotation:
+      type: object
+      properties:
+        author_reference:
+          $ref: '#/components/schemas/Reference'
+        author_string:
+          type: string
+        time:
+          type: string
+          format: date-time
+        text:
+          type: string
+          description: The annotation text
+
+    PatientContact:
+      type: object
+      properties:
+        relationship:
+          type: array
+          items:
+            $ref: '#/components/schemas/CodeableConcept'
+          description: The kind of relationship
+        name:
+          $ref: '#/components/schemas/HumanName'
+        telecom:
+          type: array
+          items:
+            $ref: '#/components/schemas/ContactPoint'
+        address:
+          $ref: '#/components/schemas/Address'
+        gender:
+          type: string
+          enum: [male, female, other, unknown]
+        organization:
+          $ref: '#/components/schemas/Reference'
+
+    PatientCommunication:
+      type: object
+      properties:
+        language:
+          $ref: '#/components/schemas/CodeableConcept'
+        preferred:
+          type: boolean
+          description: Language preference indicator
+
+    ObservationReferenceRange:
+      type: object
+      properties:
+        low:
+          $ref: '#/components/schemas/Quantity'
+        high:
+          $ref: '#/components/schemas/Quantity'
+        type:
+          $ref: '#/components/schemas/CodeableConcept'
+        applies_to:
+          type: array
+          items:
+            $ref: '#/components/schemas/CodeableConcept'
+        age:
+          $ref: '#/components/schemas/Range'
+        text:
+          type: string
+
+    ObservationComponent:
+      type: object
+      properties:
+        code:
+          $ref: '#/components/schemas/CodeableConcept'
+        value_quantity:
+          $ref: '#/components/schemas/Quantity'
+        value_string:
+          type: string
+        value_boolean:
+          type: boolean
+        interpretation:
+          type: array
+          items:
+            $ref: '#/components/schemas/CodeableConcept'
+        reference_range:
+          type: array
+          items:
+            $ref: '#/components/schemas/ObservationReferenceRange'
+
+    Range:
+      type: object
+      properties:
+        low:
+          $ref: '#/components/schemas/Quantity'
+        high:
+          $ref: '#/components/schemas/Quantity'
+
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [healthy, ready, alive, degraded, unhealthy]
+          description: Overall health status
+        timestamp:
+          type: string
+          format: date-time
+          description: When the health check was performed
+        version:
+          type: string
+          description: API version
+        checks:
+          type: object
+          additionalProperties: true
+          description: Detailed health check results
+
+    Pagination:
+      type: object
+      properties:
+        page:
+          type: integer
+          description: Current page number
+        limit:
+          type: integer
+          description: Items per page
+        total:
+          type: integer
+          description: Total number of items
+        total_pages:
+          type: integer
+          description: Total number of pages
+        has_next:
+          type: boolean
+          description: Whether there is a next page
+        has_prev:
+          type: boolean
+          description: Whether there is a previous page
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Error type
+        message:
+          type: string
+          description: Human-readable error message
+        details:
+          type: object
+          additionalProperties: true
+          description: Additional error details
+        timestamp:
+          type: string
+          format: date-time
+          description: When the error occurred
+
+  responses:
+    BadRequest:
+      description: Bad request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: "validation_error"
+            message: "Invalid input data"
+            details:
+              field: "email"
+              issue: "Invalid email format"
+            timestamp: "2024-01-15T10:30:00Z"
+
+    Unauthorized:
+      description: Unauthorized
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: "unauthorized"
+            message: "Invalid or missing authentication token"
+            timestamp: "2024-01-15T10:30:00Z"
+
+    Forbidden:
+      description: Forbidden
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: "forbidden"
+            message: "Insufficient permissions to access this resource"
+            timestamp: "2024-01-15T10:30:00Z"
+
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: "not_found"
+            message: "The requested resource was not found"
+            timestamp: "2024-01-15T10:30:00Z"
+
+    InternalServerError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: "internal_error"
+            message: "An internal server error occurred"
+            timestamp: "2024-01-15T10:30:00Z"
