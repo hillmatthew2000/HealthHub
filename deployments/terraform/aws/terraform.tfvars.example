@@ -1,0 +1,54 @@
+# Development environment configuration
+environment = "dev"
+aws_region  = "us-west-2"
+owner       = "healthcare-team"
+
+# Networking
+vpc_cidr                = "10.0.0.0/16"
+availability_zones      = ["us-west-2a", "us-west-2b", "us-west-2c"]
+private_subnet_cidrs    = ["10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24"]
+public_subnet_cidrs     = ["10.0.101.0/24", "10.0.102.0/24", "10.0.103.0/24"]
+database_subnet_cidrs   = ["10.0.201.0/24", "10.0.202.0/24", "10.0.203.0/24"]
+
+# EKS Configuration
+kubernetes_version    = "1.28"
+node_instance_types   = ["t3.medium"]
+node_desired_capacity = 2
+node_max_capacity     = 5
+node_min_capacity     = 1
+
+# Database Configuration (smaller for dev)
+db_instance_class           = "db.t3.micro"
+db_allocated_storage        = 20
+db_max_allocated_storage    = 50
+db_backup_retention_period  = 3
+db_deletion_protection      = false
+
+# Redis Configuration
+redis_node_type        = "cache.t3.micro"
+redis_num_cache_nodes  = 1
+
+# Application Configuration
+app_image_tag      = "latest"
+app_replicas       = 2
+app_cpu_request    = "100m"
+app_cpu_limit      = "300m"
+app_memory_request = "128Mi"
+app_memory_limit   = "256Mi"
+
+# Security Configuration (more permissive for dev)
+allowed_cidr_blocks = ["0.0.0.0/0"]
+enable_waf          = false
+enable_cloudtrail   = false
+enable_guardduty    = false
+
+# Monitoring Configuration
+enable_prometheus = true
+enable_grafana    = false
+log_retention_days = 7
+
+# Backup Configuration (disabled for dev)
+enable_backups = false
+
+# Domain Configuration
+domain_name = "api-dev.yourdomain.com"
