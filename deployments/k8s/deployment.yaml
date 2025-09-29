@@ -1,0 +1,156 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: healthcare-api
+  namespace: healthcare-api
+  labels:
+    app: healthcare-api
+    version: v1
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: healthcare-api
+  template:
+    metadata:
+      labels:
+        app: healthcare-api
+        version: v1
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: healthcare-api-sa
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: healthcare-api
+        image: your-registry/healthcare-api:latest
+        imagePullPolicy: Always
+        ports:
+        - name: http
+          containerPort: 8080
+          protocol: TCP
+        env:
+        - name: PORT
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-api-config
+              key: PORT
+        - name: ENVIRONMENT
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-api-config
+              key: ENVIRONMENT
+        - name: LOG_LEVEL
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-api-config
+              key: LOG_LEVEL
+        - name: ALLOWED_ORIGINS
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-api-config
+              key: ALLOWED_ORIGINS
+        - name: RATE_LIMIT_ENABLED
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-api-config
+              key: RATE_LIMIT_ENABLED
+        - name: RATE_LIMIT_RPM
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-api-config
+              key: RATE_LIMIT_RPM
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: healthcare-api-secrets
+              key: DATABASE_URL
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: healthcare-api-secrets
+              key: JWT_SECRET
+        - name: ENCRYPTION_KEY
+          valueFrom:
+            secretKeyRef:
+              name: healthcare-api-secrets
+              key: ENCRYPTION_KEY
+        - name: REDIS_URL
+          valueFrom:
+            secretKeyRef:
+              name: healthcare-api-secrets
+              key: REDIS_URL
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+            scheme: HTTP
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 5
+          successThreshold: 1
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+            scheme: HTTP
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 5
+          successThreshold: 1
+          failureThreshold: 3
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8080
+            scheme: HTTP
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          successThreshold: 1
+          failureThreshold: 30
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 65534
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      terminationGracePeriodSeconds: 30
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: healthcare-api-sa
+  namespace: healthcare-api
+  labels:
+    app: healthcare-api
+automountServiceAccountToken: false
