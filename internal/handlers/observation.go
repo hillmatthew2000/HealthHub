@@ -83,8 +83,8 @@ func (h *ObservationHandler) CreateObservation(c *gin.Context) {
 	}
 
 	// Set created by user
-	if userID, exists := auth.GetUserID(c); exists {
-		observation.CreatedBy = userID
+	if p, ok := auth.PrincipalFrom(c); ok {
+		observation.CreatedBy = p.UserID
 	}
 
 	if err := h.db.Create(&observation).Error; err != nil {
@@ -419,7 +419,7 @@ func (h *ObservationHandler) DeleteObservation(c *gin.Context) {
 // @Tags observations
 // @Accept json
 // @Produce json
-// @Param patientId path string true "Patient ID"
+// @Param id path string true "Patient ID"
 // @Param page query int false "Page number (default: 1)"
 // @Param limit query int false "Items per page (default: 10, max: 100)"
 // @Param status query string false "Filter by status"
@@ -431,9 +431,9 @@ func (h *ObservationHandler) DeleteObservation(c *gin.Context) {
 // @Failure 404 {object} ErrorResponse
 // @Failure 500 {object} ErrorResponse
 // @Security BearerAuth
-// @Router /api/v1/patients/{patientId}/observations [get]
+// @Router /api/v1/patients/{id}/observations [get]
 func (h *ObservationHandler) GetPatientObservations(c *gin.Context) {
-	patientID := c.Param("patientId")
+	patientID := c.Param("id")
 	if patientID == "" {
 		c.JSON(http.StatusBadRequest, ErrorResponse{
 			Error: "Patient ID is required",

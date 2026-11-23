@@ -4,7 +4,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 )
 
@@ -12,7 +11,7 @@ import (
 type User struct {
 	ID        string     `json:"id" gorm:"primaryKey"`
 	Email     string     `json:"email" gorm:"uniqueIndex" validate:"required,email"`
-	Password  string     `json:"-" validate:"required,min=8"` // Never expose password in JSON
+	Password  string     `json:"-"` // bcrypt hash; never serialised
 	FirstName string     `json:"firstName" validate:"required"`
 	LastName  string     `json:"lastName" validate:"required"`
 	Roles     []Role     `json:"roles" gorm:"many2many:user_roles;"`
@@ -108,21 +107,6 @@ func (RolePermission) TableName() string {
 	return "role_permissions"
 }
 
-// HashPassword hashes the user's password using bcrypt
-func (u *User) HashPassword() error {
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(u.Password), bcrypt.DefaultCost)
-	if err != nil {
-		return err
-	}
-	u.Password = string(hashedPassword)
-	return nil
-}
-
-// CheckPassword verifies the provided password against the stored hash
-func (u *User) CheckPassword(password string) error {
-	return bcrypt.CompareHashAndPassword([]byte(u.Password), []byte(password))
-}
-
 // GetFullName returns the user's full name
 func (u *User) GetFullName() string {
 	return u.FirstName + " " + u.LastName
@@ -184,17 +168,16 @@ type UserInfo struct {
 
 // RegisterRequest represents a user registration request
 type RegisterRequest struct {
-	Email     string   `json:"email" validate:"required,email"`
-	Password  string   `json:"password" validate:"required,min=8"`
-	FirstName string   `json:"firstName" validate:"required"`
-	LastName  string   `json:"lastName" validate:"required"`
-	Roles     []string `json:"roles,omitempty"`
+	Email     string `json:"email" validate:"required,email,max=254"`
+	Password  string `json:"password" validate:"required,min=12,max=72"`
+	FirstName string `json:"firstName" validate:"required,max=100"`
+	LastName  string `json:"lastName" validate:"required,max=100"`
 }
 
 // ChangePasswordRequest represents a password change request
 type ChangePasswordRequest struct {
 	CurrentPassword string `json:"currentPassword" validate:"required"`
-	NewPassword     string `json:"newPassword" validate:"required,min=8"`
+	NewPassword     string `json:"newPassword" validate:"required,min=12,max=72"`
 }
 
 // UpdateUserRequest represents a user update request

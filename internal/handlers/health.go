@@ -52,14 +52,12 @@ func ReadinessCheck(db *gorm.DB) gin.HandlerFunc {
 		if err != nil {
 			checks["database"] = map[string]interface{}{
 				"status": "unhealthy",
-				"error":  err.Error(),
 			}
 			overallStatus = "not ready"
 		} else {
 			if err := sqlDB.Ping(); err != nil {
 				checks["database"] = map[string]interface{}{
 					"status": "unhealthy",
-					"error":  err.Error(),
 				}
 				overallStatus = "not ready"
 			} else {
@@ -114,7 +112,6 @@ func DetailedHealthCheck(db *gorm.DB) gin.HandlerFunc {
 		if err != nil {
 			checks["database"] = map[string]interface{}{
 				"status": "unhealthy",
-				"error":  err.Error(),
 			}
 			overallStatus = "degraded"
 		} else {
@@ -122,7 +119,6 @@ func DetailedHealthCheck(db *gorm.DB) gin.HandlerFunc {
 			if err := sqlDB.Ping(); err != nil {
 				checks["database"] = map[string]interface{}{
 					"status":        "unhealthy",
-					"error":         err.Error(),
 					"response_time": time.Since(start).Milliseconds(),
 				}
 				overallStatus = "degraded"
@@ -196,36 +192,4 @@ func DetailedHealthCheck(db *gorm.DB) gin.HandlerFunc {
 // bToMb converts bytes to megabytes
 func bToMb(b uint64) uint64 {
 	return b / 1024 / 1024
-}
-
-// CORS middleware
-func CORSMiddleware() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		c.Header("Access-Control-Allow-Origin", "*")
-		c.Header("Access-Control-Allow-Credentials", "true")
-		c.Header("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With")
-		c.Header("Access-Control-Allow-Methods", "POST, OPTIONS, GET, PUT, DELETE")
-
-		if c.Request.Method == "OPTIONS" {
-			c.AbortWithStatus(204)
-			return
-		}
-
-		c.Next()
-	}
-}
-
-// SecurityHeaders middleware adds security headers
-func SecurityHeaders() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		c.Header("X-Content-Type-Options", "nosniff")
-		c.Header("X-Frame-Options", "DENY")
-		c.Header("X-XSS-Protection", "1; mode=block")
-		c.Header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
-		c.Header("Content-Security-Policy", "default-src 'self'")
-		c.Header("Referrer-Policy", "strict-origin-when-cross-origin")
-		c.Header("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
-
-		c.Next()
-	}
 }

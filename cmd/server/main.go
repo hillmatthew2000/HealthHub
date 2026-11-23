@@ -1,7 +1,10 @@
+// Command server runs the HealthHub API.
 package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
@@ -12,21 +15,29 @@ import (
 	"github.com/hillmatthew2000/HealthHub/internal/auth"
 	"github.com/hillmatthew2000/HealthHub/internal/config"
 	"github.com/hillmatthew2000/HealthHub/internal/handlers"
+	"github.com/hillmatthew2000/HealthHub/internal/middleware"
+	"github.com/hillmatthew2000/HealthHub/internal/problem"
 	"github.com/hillmatthew2000/HealthHub/pkg/database"
 	"github.com/hillmatthew2000/HealthHub/pkg/logger"
 	"go.uber.org/zap"
 )
 
-func main() {
-	// Load configuration
-	cfg := config.Load()
+// version is set at build time with -ldflags "-X main.version=...".
+var version = "dev"
 
-	// Validate configuration
-	if err := cfg.Validate(); err != nil {
-		panic("Configuration validation failed: " + err.Error())
+func main() {
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, "healthhub:", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
 	}
 
-	// Initialize logger
 	if cfg.IsDevelopment() {
 		logger.InitDevelopment()
 	} else {
@@ -34,221 +45,154 @@ func main() {
 	}
 	defer logger.Sync()
 
-	logger.Info("Starting HealthHub API",
-		zap.String("version", "1.0.0"),
+	logger.Info("starting HealthHub API",
+		zap.String("version", version),
 		zap.String("environment", cfg.Environment),
-		zap.String("port", cfg.Port),
+		zap.String("addr", cfg.Addr()),
 	)
 
-	// Initialize database
+	tokens, err := auth.NewTokenManager(auth.TokenConfig{
+		Secret:   []byte(cfg.JWTSecret),
+		Issuer:   cfg.JWTIssuer,
+		Audience: cfg.JWTAudience,
+		TTL:      cfg.JWTTTL,
+	})
+	if err != nil {
+		return err
+	}
+	passwords, err := auth.NewPasswordHasher(cfg.BcryptCost)
+	if err != nil {
+		return err
+	}
+
 	db, err := database.NewPostgresDB(cfg.DatabaseURL)
 	if err != nil {
-		logger.Fatal("Failed to connect to database", zap.Error(err))
+		return err
 	}
-
-	// Run database migrations
+	defer func() {
+		if err := database.CloseDB(db); err != nil {
+			logger.Error("failed to close database connection", zap.Error(err))
+		}
+	}()
 	if err := database.AutoMigrate(db); err != nil {
-		logger.Fatal("Failed to migrate database", zap.Error(err))
+		return err
 	}
-
-	// Create database indexes
 	if err := database.CreateIndexes(db); err != nil {
-		logger.Warn("Failed to create some database indexes", zap.Error(err))
+		logger.Warn("failed to create some database indexes", zap.Error(err))
+	}
+	if err := auth.NewRBACService(db).InitializeDefaultRoles(); err != nil {
+		logger.Warn("failed to initialize default roles", zap.Error(err))
 	}
 
-	// Initialize RBAC service and create default roles
-	rbacService := auth.NewRBACService(db)
-	if err := rbacService.InitializeDefaultRoles(); err != nil {
-		logger.Warn("Failed to initialize default roles", zap.Error(err))
-	}
-
-	// Initialize Gin router
 	if cfg.IsProduction() {
 		gin.SetMode(gin.ReleaseMode)
 	}
-
 	r := gin.New()
-
-	// Add middleware
-	r.Use(gin.LoggerWithConfig(gin.LoggerConfig{
-		Formatter: func(param gin.LogFormatterParams) string {
-			// user_id is only present on authenticated requests.
-			userID, _ := param.Keys["user_id"].(string)
-			logger.LogHTTPRequest(
-				param.Method,
-				param.Path,
-				param.StatusCode,
-				param.Latency.Milliseconds(),
-				userID,
-			)
-			return ""
-		},
+	// Only trust X-Forwarded-For from configured proxies; otherwise any
+	// client could spoof its IP address.
+	if err := r.SetTrustedProxies(cfg.TrustedProxies); err != nil {
+		return fmt.Errorf("invalid TRUSTED_PROXIES: %w", err)
+	}
+	r.Use(func(c *gin.Context) {
+		start := time.Now()
+		c.Next()
+		// Log the route template rather than the raw URL: paths and query
+		// strings can contain identifiers and search terms that are PHI.
+		route := c.FullPath()
+		if route == "" {
+			route = "unmatched"
+		}
+		logger.LogHTTPRequest(c.Request.Method, route, c.Writer.Status(),
+			time.Since(start).Milliseconds(), c.GetString(auth.UserIDKey))
+	})
+	r.Use(gin.CustomRecovery(func(c *gin.Context, _ any) {
+		problem.Write(c, problem.Internal())
 	}))
-	r.Use(gin.Recovery())
-
-	// CORS middleware
+	r.Use(middleware.SecurityHeaders(cfg.TLSEnabled || cfg.IsProduction()))
+	r.Use(middleware.CORS(cfg.AllowedOrigins))
 	r.Use(func(c *gin.Context) {
-		origin := c.Request.Header.Get("Origin")
-		allowed := false
-
-		for _, allowedOrigin := range cfg.AllowedOrigins {
-			if allowedOrigin == "*" || allowedOrigin == origin {
-				allowed = true
-				break
-			}
-		}
-
-		if allowed {
-			c.Header("Access-Control-Allow-Origin", origin)
-		}
-		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization")
-		c.Header("Access-Control-Allow-Credentials", "true")
-
-		if c.Request.Method == "OPTIONS" {
-			c.AbortWithStatus(204)
-			return
-		}
-
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, cfg.MaxBodyBytes)
 		c.Next()
 	})
-
-	// Security headers middleware
-	r.Use(func(c *gin.Context) {
-		c.Header("X-Content-Type-Options", "nosniff")
-		c.Header("X-Frame-Options", "DENY")
-		c.Header("X-XSS-Protection", "1; mode=block")
-		c.Header("Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload")
-		c.Header("Content-Security-Policy", "default-src 'self'")
-		c.Header("Referrer-Policy", "strict-origin-when-cross-origin")
-		c.Next()
+	r.NoRoute(func(c *gin.Context) {
+		problem.Write(c, problem.NotFound("No route matches "+c.Request.Method+" "+c.Request.URL.Path+"."))
 	})
 
-	// Health check endpoint
-	r.GET(cfg.HealthCheckPath, func(c *gin.Context) {
-		// Check database connectivity
-		sqlDB, err := db.DB()
-		if err != nil {
-			c.JSON(500, handlers.HealthResponse{
-				Status:    "unhealthy",
-				Timestamp: time.Now(),
-				Services: map[string]string{
-					"database": "error: " + err.Error(),
-				},
-			})
-			return
-		}
+	// Health probes: liveness never touches dependencies, readiness checks
+	// the database. /health is kept as an alias of readiness.
+	r.GET("/health/live", handlers.LivenessCheck())
+	r.GET("/health/ready", handlers.ReadinessCheck(db))
+	r.GET("/health", handlers.ReadinessCheck(db))
 
-		if err := sqlDB.Ping(); err != nil {
-			c.JSON(500, handlers.HealthResponse{
-				Status:    "unhealthy",
-				Timestamp: time.Now(),
-				Services: map[string]string{
-					"database": "error: " + err.Error(),
-				},
-			})
-			return
-		}
-
-		c.JSON(200, handlers.HealthResponse{
-			Status:    "healthy",
-			Timestamp: time.Now(),
-			Version:   "1.0.0",
-			Services: map[string]string{
-				"database": "ok",
-				"api":      "ok",
-			},
-		})
-	})
-
-	// Initialize token manager
-	tokenManager := auth.NewTokenManager(cfg.JWTSecret, "HealthHub API")
-
-	// Initialize handlers
 	patientHandler := handlers.NewPatientHandler(db)
 	observationHandler := handlers.NewObservationHandler(db)
-	authHandler := handlers.NewAuthHandler(db, cfg.JWTSecret)
+	authHandler := handlers.NewAuthHandler(db, tokens, passwords, cfg.AllowRegistration)
 
-	// Public routes
-	public := r.Group("/api/v1")
-	{
-		public.POST("/auth/login", authHandler.Login)
-		public.POST("/auth/register", authHandler.Register)
-	}
+	api := r.Group("/api/v1")
+	api.POST("/auth/login", authHandler.Login)
+	api.POST("/auth/register", authHandler.Register)
 
-	// Protected routes
-	protected := r.Group("/api/v1")
-	protected.Use(auth.AuthMiddleware(tokenManager))
-	{
-		// Auth routes
-		authRoutes := protected.Group("/auth")
-		{
-			authRoutes.POST("/refresh", authHandler.RefreshToken)
-			authRoutes.GET("/profile", authHandler.GetProfile)
-			authRoutes.POST("/change-password", authHandler.ChangePassword)
-		}
+	protected := api.Group("")
+	protected.Use(auth.Authenticate(tokens))
 
-		// Patient endpoints
-		patients := protected.Group("/patients")
-		{
-			patients.POST("", auth.RequireRole("practitioner", "admin"), patientHandler.CreatePatient)
-			patients.GET("", auth.RequireRole("practitioner", "admin", "nurse"), patientHandler.GetPatients)
-			patients.GET("/:id", auth.RequireRole("practitioner", "admin", "nurse"), patientHandler.GetPatient)
-			patients.PUT("/:id", auth.RequireRole("practitioner", "admin"), patientHandler.UpdatePatient)
-			patients.DELETE("/:id", auth.RequireRole("admin"), patientHandler.DeletePatient)
-			patients.GET("/:patientId/observations", auth.RequireRole("practitioner", "admin", "nurse"), observationHandler.GetPatientObservations)
-		}
+	authRoutes := protected.Group("/auth")
+	authRoutes.POST("/refresh", authHandler.RefreshToken)
+	authRoutes.GET("/profile", authHandler.GetProfile)
+	authRoutes.POST("/change-password", authHandler.ChangePassword)
 
-		// Observation endpoints
-		observations := protected.Group("/observations")
-		{
-			observations.POST("", auth.RequireRole("practitioner", "admin", "lab-tech"), observationHandler.CreateObservation)
-			observations.GET("", auth.RequireRole("practitioner", "admin", "nurse"), observationHandler.GetObservations)
-			observations.GET("/:id", auth.RequireRole("practitioner", "admin", "nurse"), observationHandler.GetObservation)
-			observations.PUT("/:id", auth.RequireRole("practitioner", "admin"), observationHandler.UpdateObservation)
-			observations.DELETE("/:id", auth.RequireRole("admin"), observationHandler.DeleteObservation)
-		}
-	}
+	can := auth.Require
+	patients := protected.Group("/patients")
+	patients.POST("", can(auth.ResourcePatients, auth.ActionCreate), patientHandler.CreatePatient)
+	patients.GET("", can(auth.ResourcePatients, auth.ActionRead), patientHandler.GetPatients)
+	patients.GET("/:id", can(auth.ResourcePatients, auth.ActionRead), patientHandler.GetPatient)
+	patients.PUT("/:id", can(auth.ResourcePatients, auth.ActionUpdate), patientHandler.UpdatePatient)
+	patients.DELETE("/:id", can(auth.ResourcePatients, auth.ActionDelete), patientHandler.DeletePatient)
+	patients.GET("/:id/observations", can(auth.ResourceObservations, auth.ActionRead), observationHandler.GetPatientObservations)
 
-	// Start server with graceful shutdown
+	observations := protected.Group("/observations")
+	observations.POST("", can(auth.ResourceObservations, auth.ActionCreate), observationHandler.CreateObservation)
+	observations.GET("", can(auth.ResourceObservations, auth.ActionRead), observationHandler.GetObservations)
+	observations.GET("/:id", can(auth.ResourceObservations, auth.ActionRead), observationHandler.GetObservation)
+	observations.PUT("/:id", can(auth.ResourceObservations, auth.ActionUpdate), observationHandler.UpdateObservation)
+	observations.DELETE("/:id", can(auth.ResourceObservations, auth.ActionDelete), observationHandler.DeleteObservation)
+
 	srv := &http.Server{
-		Addr:    ":" + cfg.Port,
-		Handler: r,
+		Addr:              cfg.Addr(),
+		Handler:           r,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       cfg.ReadTimeout,
+		WriteTimeout:      cfg.WriteTimeout,
+		IdleTimeout:       cfg.IdleTimeout,
 	}
 
-	// Start server in a goroutine
-	go func() {
-		logger.Info("Server starting", zap.String("addr", srv.Addr))
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
+	serveErr := make(chan error, 1)
+	go func() {
+		logger.Info("server listening", zap.String("addr", srv.Addr), zap.Bool("tls", cfg.TLSEnabled))
 		if cfg.TLSEnabled {
-			if err := srv.ListenAndServeTLS(cfg.TLSCertFile, cfg.TLSKeyFile); err != nil && err != http.ErrServerClosed {
-				logger.Fatal("Failed to start HTTPS server", zap.Error(err))
-			}
+			serveErr <- srv.ListenAndServeTLS(cfg.TLSCertFile, cfg.TLSKeyFile)
 		} else {
-			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				logger.Fatal("Failed to start HTTP server", zap.Error(err))
-			}
+			serveErr <- srv.ListenAndServe()
 		}
 	}()
 
-	// Wait for interrupt signal to gracefully shutdown the server
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
-	logger.Info("Server shutting down...")
+	select {
+	case err := <-serveErr:
+		if !errors.Is(err, http.ErrServerClosed) {
+			return fmt.Errorf("server failed: %w", err)
+		}
+		return nil
+	case <-ctx.Done():
+	}
 
-	// Give outstanding requests a deadline for completion
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	logger.Info("shutting down", zap.Duration("timeout", cfg.ShutdownTimeout))
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()
-
-	if err := srv.Shutdown(ctx); err != nil {
-		logger.Fatal("Server forced to shutdown", zap.Error(err))
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		return fmt.Errorf("graceful shutdown failed: %w", err)
 	}
-
-	// Close database connection
-	if err := database.CloseDB(db); err != nil {
-		logger.Error("Failed to close database connection", zap.Error(err))
-	}
-
-	logger.Info("Server exited")
+	logger.Info("server stopped")
+	return nil
 }

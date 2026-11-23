@@ -1,471 +1,244 @@
 package handlers
 
 import (
+	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
 	"github.com/hillmatthew2000/HealthHub/internal/auth"
 	"github.com/hillmatthew2000/HealthHub/internal/models"
+	"github.com/hillmatthew2000/HealthHub/internal/problem"
+	"github.com/hillmatthew2000/HealthHub/pkg/logger"
+	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
 
-// AuthHandler handles authentication requests
+// AuthHandler handles authentication requests.
 type AuthHandler struct {
-	db           *gorm.DB
-	validator    *validator.Validate
-	tokenManager *auth.TokenManager
-	rbacService  *auth.RBACService
+	db                *gorm.DB
+	validator         *validator.Validate
+	tokens            *auth.TokenManager
+	passwords         *auth.PasswordHasher
+	allowRegistration bool
 }
 
-// NewAuthHandler creates a new authentication handler
-func NewAuthHandler(db *gorm.DB, jwtSecret string) *AuthHandler {
-	tokenManager := auth.NewTokenManager(jwtSecret, "HealthHub API")
-	rbacService := auth.NewRBACService(db)
-
+// NewAuthHandler creates a new authentication handler.
+func NewAuthHandler(db *gorm.DB, tokens *auth.TokenManager, passwords *auth.PasswordHasher, allowRegistration bool) *AuthHandler {
 	return &AuthHandler{
-		db:           db,
-		validator:    validator.New(),
-		tokenManager: tokenManager,
-		rbacService:  rbacService,
+		db:                db,
+		validator:         validator.New(),
+		tokens:            tokens,
+		passwords:         passwords,
+		allowRegistration: allowRegistration,
 	}
 }
 
-// Login authenticates a user and returns a JWT token
-// @Summary User login
-// @Description Authenticate user and get access token
-// @Tags auth
-// @Accept json
-// @Produce json
-// @Param credentials body models.AuthRequest true "Login credentials"
-// @Success 200 {object} models.AuthResponse
-// @Failure 400 {object} ErrorResponse
-// @Failure 401 {object} ErrorResponse
-// @Failure 500 {object} ErrorResponse
-// @Router /api/v1/auth/login [post]
+// Login authenticates a user and returns an access token.
 func (h *AuthHandler) Login(c *gin.Context) {
 	var req models.AuthRequest
-
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, ErrorResponse{
-			Error:   "Invalid request body",
-			Message: err.Error(),
-			Code:    "INVALID_REQUEST_BODY",
-		})
+	if !h.bind(c, &req) {
 		return
 	}
+	email := normalizeEmail(req.Email)
 
-	if err := h.validator.Struct(req); err != nil {
-		c.JSON(http.StatusBadRequest, ErrorResponse{
-			Error:   "Validation failed",
-			Message: err.Error(),
-			Code:    "VALIDATION_FAILED",
-		})
-		return
-	}
-
-	// Find user by email
 	var user models.User
-	if err := h.db.Preload("Roles").Where("email = ? AND active = ?", req.Email, true).First(&user).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
-			c.JSON(http.StatusUnauthorized, ErrorResponse{
-				Error: "Invalid credentials",
-				Code:  "INVALID_CREDENTIALS",
-			})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, ErrorResponse{
-			Error:   "Failed to authenticate user",
-			Message: err.Error(),
-			Code:    "DATABASE_ERROR",
-		})
+	err := h.db.WithContext(c.Request.Context()).Preload("Roles").
+		Where("email = ? AND active = ?", email, true).First(&user).Error
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		internalError(c, "load user for login", err)
 		return
 	}
 
-	// Check password
-	if err := user.CheckPassword(req.Password); err != nil {
-		c.JSON(http.StatusUnauthorized, ErrorResponse{
-			Error: "Invalid credentials",
-			Code:  "INVALID_CREDENTIALS",
-		})
+	// Verify runs a bcrypt comparison even for unknown accounts so the
+	// response time does not reveal which email addresses are registered.
+	if !h.passwords.Verify(user.Password, req.Password) {
+		logger.LogSecurityEvent("login_failed", user.ID, nil)
+		problem.Write(c, problem.New(http.StatusUnauthorized, problem.CodeInvalidCredentials,
+			"The email address or password is incorrect."))
 		return
 	}
 
-	// Update last login time
-	now := time.Now()
-	user.LastLogin = &now
-	h.db.Model(&user).Update("last_login", now)
-
-	// Generate JWT token
-	roleNames := user.GetRoleNames()
-	token, expiresAt, err := h.tokenManager.GenerateToken(user.ID, user.Email, roleNames)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, ErrorResponse{
-			Error:   "Failed to generate token",
-			Message: err.Error(),
-			Code:    "TOKEN_GENERATION_FAILED",
-		})
-		return
+	now := time.Now().UTC()
+	if err := h.db.WithContext(c.Request.Context()).Model(&user).Update("last_login", now).Error; err != nil {
+		logger.Warn("failed to record last login", zap.String("user_id", user.ID), zap.Error(err))
 	}
-
-	// Prepare response
-	response := models.AuthResponse{
-		Token:     token,
-		ExpiresAt: expiresAt,
-		User: models.UserInfo{
-			ID:        user.ID,
-			Email:     user.Email,
-			FirstName: user.FirstName,
-			LastName:  user.LastName,
-			Roles:     roleNames,
-			Active:    user.Active,
-		},
-	}
-
-	c.JSON(http.StatusOK, response)
+	logger.LogSecurityEvent("login_succeeded", user.ID, nil)
+	h.respondWithToken(c, http.StatusOK, &user)
 }
 
-// Register creates a new user account
-// @Summary User registration
-// @Description Create a new user account
-// @Tags auth
-// @Accept json
-// @Produce json
-// @Param user body models.RegisterRequest true "User registration data"
-// @Success 201 {object} models.AuthResponse
-// @Failure 400 {object} ErrorResponse
-// @Failure 409 {object} ErrorResponse
-// @Failure 500 {object} ErrorResponse
-// @Router /api/v1/auth/register [post]
+// Register creates a new user account. Self-registration is disabled unless
+// ALLOW_REGISTRATION is set, and self-registered accounts receive no roles:
+// an administrator must grant access explicitly.
 func (h *AuthHandler) Register(c *gin.Context) {
+	if !h.allowRegistration {
+		problem.Write(c, problem.New(http.StatusForbidden, problem.CodeRegistrationDisabled,
+			"Self-registration is disabled. Ask an administrator to create your account."))
+		return
+	}
+
 	var req models.RegisterRequest
-
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, ErrorResponse{
-			Error:   "Invalid request body",
-			Message: err.Error(),
-			Code:    "INVALID_REQUEST_BODY",
-		})
+	if !h.bind(c, &req) {
+		return
+	}
+	hash, err := h.passwords.Hash(req.Password)
+	if err != nil {
+		problem.Write(c, problem.Validation(problem.FieldError{Field: "password", Message: err.Error()}))
 		return
 	}
 
-	if err := h.validator.Struct(req); err != nil {
-		c.JSON(http.StatusBadRequest, ErrorResponse{
-			Error:   "Validation failed",
-			Message: err.Error(),
-			Code:    "VALIDATION_FAILED",
-		})
-		return
-	}
-
-	// Check if user already exists
-	var existingUser models.User
-	if err := h.db.Where("email = ?", req.Email).First(&existingUser).Error; err == nil {
-		c.JSON(http.StatusConflict, ErrorResponse{
-			Error: "User with this email already exists",
-			Code:  "USER_ALREADY_EXISTS",
-		})
-		return
-	}
-
-	// Create new user
 	user := models.User{
-		Email:     req.Email,
-		Password:  req.Password,
-		FirstName: req.FirstName,
-		LastName:  req.LastName,
+		Email:     normalizeEmail(req.Email),
+		Password:  hash,
+		FirstName: strings.TrimSpace(req.FirstName),
+		LastName:  strings.TrimSpace(req.LastName),
 		Active:    true,
 	}
 
-	// Hash password
-	if err := user.HashPassword(); err != nil {
-		c.JSON(http.StatusInternalServerError, ErrorResponse{
-			Error:   "Failed to process password",
-			Message: err.Error(),
-			Code:    "PASSWORD_HASH_FAILED",
-		})
+	db := h.db.WithContext(c.Request.Context())
+	var count int64
+	if err := db.Model(&models.User{}).Where("email = ?", user.Email).Count(&count).Error; err != nil {
+		internalError(c, "check existing user", err)
+		return
+	}
+	if count > 0 {
+		problem.Write(c, problem.Conflict("An account with this email address already exists."))
+		return
+	}
+	if err := db.Create(&user).Error; err != nil {
+		internalError(c, "create user", err)
 		return
 	}
 
-	// Start transaction
-	tx := h.db.Begin()
-	defer func() {
-		if r := recover(); r != nil {
-			tx.Rollback()
-		}
-	}()
-
-	// Create user
-	if err := tx.Create(&user).Error; err != nil {
-		tx.Rollback()
-		c.JSON(http.StatusInternalServerError, ErrorResponse{
-			Error:   "Failed to create user",
-			Message: err.Error(),
-			Code:    "DATABASE_ERROR",
-		})
-		return
-	}
-
-	// Assign default roles
-	defaultRoles := req.Roles
-	if len(defaultRoles) == 0 {
-		defaultRoles = []string{"nurse"} // Default role for new users
-	}
-
-	for _, roleName := range defaultRoles {
-		var role models.Role
-		if err := tx.Where("name = ?", roleName).First(&role).Error; err != nil {
-			tx.Rollback()
-			c.JSON(http.StatusBadRequest, ErrorResponse{
-				Error: "Invalid role: " + roleName,
-				Code:  "INVALID_ROLE",
-			})
-			return
-		}
-
-		if err := h.rbacService.AssignRoleToUser(user.ID, role.ID, "system"); err != nil {
-			tx.Rollback()
-			c.JSON(http.StatusInternalServerError, ErrorResponse{
-				Error:   "Failed to assign role",
-				Message: err.Error(),
-				Code:    "ROLE_ASSIGNMENT_FAILED",
-			})
-			return
-		}
-	}
-
-	if err := tx.Commit().Error; err != nil {
-		c.JSON(http.StatusInternalServerError, ErrorResponse{
-			Error:   "Failed to complete registration",
-			Message: err.Error(),
-			Code:    "TRANSACTION_FAILED",
-		})
-		return
-	}
-
-	// Load user with roles for response
-	if err := h.db.Preload("Roles").Where("id = ?", user.ID).First(&user).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, ErrorResponse{
-			Error:   "Failed to load user data",
-			Message: err.Error(),
-			Code:    "DATABASE_ERROR",
-		})
-		return
-	}
-
-	// Generate JWT token
-	roleNames := user.GetRoleNames()
-	token, expiresAt, err := h.tokenManager.GenerateToken(user.ID, user.Email, roleNames)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, ErrorResponse{
-			Error:   "Failed to generate token",
-			Message: err.Error(),
-			Code:    "TOKEN_GENERATION_FAILED",
-		})
-		return
-	}
-
-	// Prepare response
-	response := models.AuthResponse{
-		Token:     token,
-		ExpiresAt: expiresAt,
-		User: models.UserInfo{
-			ID:        user.ID,
-			Email:     user.Email,
-			FirstName: user.FirstName,
-			LastName:  user.LastName,
-			Roles:     roleNames,
-			Active:    user.Active,
-		},
-	}
-
-	c.JSON(http.StatusCreated, response)
+	logger.LogAuditEvent("create", "user", user.ID, map[string]any{"source": "self_registration"})
+	h.respondWithToken(c, http.StatusCreated, &user)
 }
 
-// RefreshToken refreshes an existing JWT token
-// @Summary Refresh access token
-// @Description Refresh an existing access token
-// @Tags auth
-// @Accept json
-// @Produce json
-// @Success 200 {object} models.AuthResponse
-// @Failure 401 {object} ErrorResponse
-// @Failure 500 {object} ErrorResponse
-// @Security BearerAuth
-// @Router /api/v1/auth/refresh [post]
+// RefreshToken issues a new token for a caller holding a valid one. The
+// account is re-read so deactivated users and role changes take effect.
 func (h *AuthHandler) RefreshToken(c *gin.Context) {
-	claims, exists := auth.GetClaims(c)
-	if !exists {
-		c.JSON(http.StatusUnauthorized, ErrorResponse{
-			Error: "Invalid token",
-			Code:  "INVALID_TOKEN",
-		})
+	p, ok := auth.PrincipalFrom(c)
+	if !ok {
+		unauthenticated(c)
 		return
 	}
-
-	// Verify user is still active
 	var user models.User
-	if err := h.db.Preload("Roles").Where("id = ? AND active = ?", claims.UserID, true).First(&user).Error; err != nil {
-		c.JSON(http.StatusUnauthorized, ErrorResponse{
-			Error: "User not found or inactive",
-			Code:  "USER_INACTIVE",
-		})
+	err := h.db.WithContext(c.Request.Context()).Preload("Roles").
+		Where("id = ? AND active = ?", p.UserID, true).First(&user).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		problem.Write(c, problem.New(http.StatusUnauthorized, problem.CodeInvalidToken,
+			"The account no longer exists or has been deactivated."))
 		return
 	}
-
-	// Generate new token
-	roleNames := user.GetRoleNames()
-	token, expiresAt, err := h.tokenManager.GenerateToken(user.ID, user.Email, roleNames)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, ErrorResponse{
-			Error:   "Failed to generate token",
-			Message: err.Error(),
-			Code:    "TOKEN_GENERATION_FAILED",
-		})
+		internalError(c, "load user for refresh", err)
 		return
 	}
-
-	response := models.AuthResponse{
-		Token:     token,
-		ExpiresAt: expiresAt,
-		User: models.UserInfo{
-			ID:        user.ID,
-			Email:     user.Email,
-			FirstName: user.FirstName,
-			LastName:  user.LastName,
-			Roles:     roleNames,
-			Active:    user.Active,
-		},
-	}
-
-	c.JSON(http.StatusOK, response)
+	h.respondWithToken(c, http.StatusOK, &user)
 }
 
-// GetProfile returns the current user's profile
-// @Summary Get user profile
-// @Description Get the authenticated user's profile information
-// @Tags auth
-// @Accept json
-// @Produce json
-// @Success 200 {object} models.UserInfo
-// @Failure 401 {object} ErrorResponse
-// @Failure 500 {object} ErrorResponse
-// @Security BearerAuth
-// @Router /api/v1/auth/profile [get]
+// GetProfile returns the current user's profile.
 func (h *AuthHandler) GetProfile(c *gin.Context) {
-	userID, exists := auth.GetUserID(c)
-	if !exists {
-		c.JSON(http.StatusUnauthorized, ErrorResponse{
-			Error: "User not authenticated",
-			Code:  "NOT_AUTHENTICATED",
-		})
+	p, ok := auth.PrincipalFrom(c)
+	if !ok {
+		unauthenticated(c)
 		return
 	}
-
 	var user models.User
-	if err := h.db.Preload("Roles").Where("id = ?", userID).First(&user).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, ErrorResponse{
-			Error:   "Failed to fetch user profile",
-			Message: err.Error(),
-			Code:    "DATABASE_ERROR",
-		})
+	err := h.db.WithContext(c.Request.Context()).Preload("Roles").Where("id = ?", p.UserID).First(&user).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		problem.Write(c, problem.NotFound("The account no longer exists."))
 		return
 	}
-
-	userInfo := models.UserInfo{
-		ID:        user.ID,
-		Email:     user.Email,
-		FirstName: user.FirstName,
-		LastName:  user.LastName,
-		Roles:     user.GetRoleNames(),
-		Active:    user.Active,
+	if err != nil {
+		internalError(c, "load profile", err)
+		return
 	}
-
-	c.JSON(http.StatusOK, userInfo)
+	c.JSON(http.StatusOK, userInfo(&user))
 }
 
-// ChangePassword changes the current user's password
-// @Summary Change password
-// @Description Change the authenticated user's password
-// @Tags auth
-// @Accept json
-// @Produce json
-// @Param password body models.ChangePasswordRequest true "Password change data"
-// @Success 200 {object} SuccessResponse
-// @Failure 400 {object} ErrorResponse
-// @Failure 401 {object} ErrorResponse
-// @Failure 500 {object} ErrorResponse
-// @Security BearerAuth
-// @Router /api/v1/auth/change-password [post]
+// ChangePassword changes the current user's password.
 func (h *AuthHandler) ChangePassword(c *gin.Context) {
-	userID, exists := auth.GetUserID(c)
-	if !exists {
-		c.JSON(http.StatusUnauthorized, ErrorResponse{
-			Error: "User not authenticated",
-			Code:  "NOT_AUTHENTICATED",
-		})
+	p, ok := auth.PrincipalFrom(c)
+	if !ok {
+		unauthenticated(c)
 		return
 	}
-
 	var req models.ChangePasswordRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, ErrorResponse{
-			Error:   "Invalid request body",
-			Message: err.Error(),
-			Code:    "INVALID_REQUEST_BODY",
-		})
+	if !h.bind(c, &req) {
 		return
 	}
 
-	if err := h.validator.Struct(req); err != nil {
-		c.JSON(http.StatusBadRequest, ErrorResponse{
-			Error:   "Validation failed",
-			Message: err.Error(),
-			Code:    "VALIDATION_FAILED",
-		})
-		return
-	}
-
-	// Get current user
+	db := h.db.WithContext(c.Request.Context())
 	var user models.User
-	if err := h.db.Where("id = ?", userID).First(&user).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, ErrorResponse{
-			Error:   "Failed to fetch user",
-			Message: err.Error(),
-			Code:    "DATABASE_ERROR",
-		})
+	if err := db.Where("id = ?", p.UserID).First(&user).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			problem.Write(c, problem.NotFound("The account no longer exists."))
+			return
+		}
+		internalError(c, "load user for password change", err)
 		return
 	}
-
-	// Verify current password
-	if err := user.CheckPassword(req.CurrentPassword); err != nil {
-		c.JSON(http.StatusBadRequest, ErrorResponse{
-			Error: "Current password is incorrect",
-			Code:  "INVALID_CURRENT_PASSWORD",
-		})
+	if !h.passwords.Verify(user.Password, req.CurrentPassword) {
+		logger.LogSecurityEvent("password_change_failed", user.ID, nil)
+		problem.Write(c, problem.Validation(problem.FieldError{
+			Field: "currentPassword", Message: "is incorrect",
+		}))
 		return
 	}
-
-	// Update password
-	user.Password = req.NewPassword
-	if err := user.HashPassword(); err != nil {
-		c.JSON(http.StatusInternalServerError, ErrorResponse{
-			Error:   "Failed to process new password",
-			Message: err.Error(),
-			Code:    "PASSWORD_HASH_FAILED",
-		})
+	hash, err := h.passwords.Hash(req.NewPassword)
+	if err != nil {
+		problem.Write(c, problem.Validation(problem.FieldError{Field: "newPassword", Message: err.Error()}))
 		return
 	}
-
-	if err := h.db.Model(&user).Update("password", user.Password).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, ErrorResponse{
-			Error:   "Failed to update password",
-			Message: err.Error(),
-			Code:    "DATABASE_ERROR",
-		})
+	if err := db.Model(&user).Update("password", hash).Error; err != nil {
+		internalError(c, "update password", err)
 		return
 	}
+	logger.LogSecurityEvent("password_changed", user.ID, nil)
+	c.Status(http.StatusNoContent)
+}
 
-	c.JSON(http.StatusOK, NewSuccessResponse("Password changed successfully", nil))
+func (h *AuthHandler) respondWithToken(c *gin.Context, status int, user *models.User) {
+	info := userInfo(user)
+	roles := make([]auth.Role, len(info.Roles))
+	for i, r := range info.Roles {
+		roles[i] = auth.Role(r)
+	}
+	token, expiresAt, err := h.tokens.Issue(auth.Principal{UserID: user.ID, Email: user.Email, Roles: roles})
+	if err != nil {
+		internalError(c, "issue token", err)
+		return
+	}
+	c.JSON(status, models.AuthResponse{Token: token, ExpiresAt: expiresAt, User: info})
+}
+
+// bind decodes and validates a JSON body, writing a problem on failure.
+func (h *AuthHandler) bind(c *gin.Context, dst any) bool {
+	if err := c.ShouldBindJSON(dst); err != nil {
+		problem.Write(c, problem.BadRequest("The request body must be valid JSON."))
+		return false
+	}
+	if err := h.validator.Struct(dst); err != nil {
+		problem.Write(c, problem.Validation(fieldErrors(err)...))
+		return false
+	}
+	return true
+}
+
+func userInfo(u *models.User) models.UserInfo {
+	return models.UserInfo{
+		ID:        u.ID,
+		Email:     u.Email,
+		FirstName: u.FirstName,
+		LastName:  u.LastName,
+		Roles:     u.GetRoleNames(),
+		Active:    u.Active,
+	}
+}
+
+func normalizeEmail(s string) string {
+	return strings.ToLower(strings.TrimSpace(s))
 }

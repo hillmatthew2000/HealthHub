@@ -62,8 +62,8 @@ func (h *PatientHandler) CreatePatient(c *gin.Context) {
 	}
 
 	// Set created by user
-	if userID, exists := auth.GetUserID(c); exists {
-		patient.CreatedBy = userID
+	if p, ok := auth.PrincipalFrom(c); ok {
+		patient.CreatedBy = p.UserID
 	}
 
 	if err := h.db.Create(&patient).Error; err != nil {
