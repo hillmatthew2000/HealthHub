@@ -72,12 +72,14 @@ func main() {
 	// Add middleware
 	r.Use(gin.LoggerWithConfig(gin.LoggerConfig{
 		Formatter: func(param gin.LogFormatterParams) string {
+			// user_id is only present on authenticated requests.
+			userID, _ := param.Keys["user_id"].(string)
 			logger.LogHTTPRequest(
 				param.Method,
 				param.Path,
 				param.StatusCode,
 				param.Latency.Milliseconds(),
-				param.Keys["user_id"].(string),
+				userID,
 			)
 			return ""
 		},
@@ -179,11 +181,11 @@ func main() {
 	protected.Use(auth.AuthMiddleware(tokenManager))
 	{
 		// Auth routes
-		auth := protected.Group("/auth")
+		authRoutes := protected.Group("/auth")
 		{
-			auth.POST("/refresh", authHandler.RefreshToken)
-			auth.GET("/profile", authHandler.GetProfile)
-			auth.POST("/change-password", authHandler.ChangePassword)
+			authRoutes.POST("/refresh", authHandler.RefreshToken)
+			authRoutes.GET("/profile", authHandler.GetProfile)
+			authRoutes.POST("/change-password", authHandler.ChangePassword)
 		}
 
 		// Patient endpoints

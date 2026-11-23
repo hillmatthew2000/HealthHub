@@ -72,7 +72,7 @@ func (tm *TokenManager) ValidateToken(tokenString string) (*Claims, error) {
 		return claims, nil
 	}
 
-	return nil, jwt.ErrTokenInvalid
+	return nil, jwt.ErrTokenInvalidClaims
 }
 
 // RefreshToken generates a new token from an existing valid token
