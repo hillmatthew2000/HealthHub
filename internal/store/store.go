@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -55,6 +56,10 @@ func Open(ctx context.Context, cfg PoolConfig) (*pgxpool.Pool, error) {
 		pc.MaxConnIdleTime = cfg.MaxConnIdleTime
 	}
 	pc.ConnConfig.RuntimeParams["timezone"] = "UTC"
+	pc.AfterConnect = func(_ context.Context, conn *pgx.Conn) error {
+		scanTimesInUTC(conn)
+		return nil
+	}
 	if pc.ConnConfig.RuntimeParams["application_name"] == "" {
 		pc.ConnConfig.RuntimeParams["application_name"] = "healthhub"
 	}
@@ -68,6 +73,17 @@ func Open(ctx context.Context, cfg PoolConfig) (*pgxpool.Pool, error) {
 		return nil, fmt.Errorf("store: connect: %w", err)
 	}
 	return pool, nil
+}
+
+// scanTimesInUTC makes timestamptz values scan as UTC times. pgx otherwise
+// returns them in the server process's local time zone, so API responses
+// would carry whatever offset the host happens to use.
+func scanTimesInUTC(conn *pgx.Conn) {
+	conn.TypeMap().RegisterType(&pgtype.Type{
+		Name:  "timestamptz",
+		OID:   pgtype.TimestamptzOID,
+		Codec: &pgtype.TimestamptzCodec{ScanLocation: time.UTC},
+	})
 }
 
 // DB is the subset of pgxpool.Pool and pgx.Tx used by the repositories.

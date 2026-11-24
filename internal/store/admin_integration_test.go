@@ -116,6 +116,9 @@ func TestAuditLog(t *testing.T) {
 		t.Fatalf("List = %d %+v", total, all)
 	}
 	first := all[2]
+	if first.OccurredAt.Location() != time.UTC {
+		t.Errorf("occurredAt is in %v, want UTC", first.OccurredAt.Location())
+	}
 	if first.ActorID != actor || first.RequestID != "req-1" || first.ClientIP != "203.0.113.9" || first.ResourceIDs[0] != p1 {
 		t.Errorf("event = %+v", first)
 	}
