@@ -19,12 +19,12 @@ resource "kubernetes_secret" "db_credentials" {
   }
 
   data = {
-    DB_URL      = "postgresql://${aws_db_instance.postgres.username}:${random_password.db_password.result}@${aws_db_instance.postgres.endpoint}:${aws_db_instance.postgres.port}/${aws_db_instance.postgres.db_name}?sslmode=require"
-    DB_HOST     = aws_db_instance.postgres.endpoint
-    DB_PORT     = tostring(aws_db_instance.postgres.port)
-    DB_NAME     = aws_db_instance.postgres.db_name
-    DB_USER     = aws_db_instance.postgres.username
-    DB_PASSWORD = random_password.db_password.result
+    DATABASE_URL = "postgres://${aws_db_instance.postgres.username}:${random_password.db_password.result}@${aws_db_instance.postgres.address}:${aws_db_instance.postgres.port}/${aws_db_instance.postgres.db_name}?sslmode=require"
+    DB_HOST      = aws_db_instance.postgres.address
+    DB_PORT      = tostring(aws_db_instance.postgres.port)
+    DB_NAME      = aws_db_instance.postgres.db_name
+    DB_USER      = aws_db_instance.postgres.username
+    DB_PASSWORD  = random_password.db_password.result
   }
 
   type = "Opaque"
@@ -40,7 +40,6 @@ resource "kubernetes_secret" "app_secrets" {
   data = {
     JWT_SECRET     = random_password.jwt_secret.result
     ENCRYPTION_KEY = random_password.encryption_key.result
-    REDIS_URL      = "redis://${aws_elasticache_cluster.redis.cache_nodes[0].address}:${aws_elasticache_cluster.redis.cache_nodes[0].port}"
   }
 
   type = "Opaque"
@@ -109,7 +108,7 @@ resource "kubernetes_deployment" "healthcare_api" {
 
           port {
             container_port = 8080
-            name          = "http"
+            name           = "http"
           }
 
           env_from {
@@ -274,8 +273,8 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "healthcare_api" {
       scale_down {
         stabilization_window_seconds = 300
         policy {
-          type          = "Percent"
-          value         = 10
+          type           = "Percent"
+          value          = 10
           period_seconds = 60
         }
       }
@@ -283,8 +282,8 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "healthcare_api" {
       scale_up {
         stabilization_window_seconds = 60
         policy {
-          type          = "Percent"
-          value         = 100
+          type           = "Percent"
+          value          = 100
           period_seconds = 15
         }
       }

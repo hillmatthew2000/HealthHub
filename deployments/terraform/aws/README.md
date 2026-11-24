@@ -19,7 +19,6 @@ This guide walks you through deploying the Healthcare API to AWS using Terraform
    - `AmazonEKS_CNI_Policy`
    - `AmazonEC2ContainerRegistryFullAccess`
    - `AmazonRDSFullAccess`
-   - `AmazonElastiCacheFullAccess`
    - `IAMFullAccess`
    - `AmazonVPCFullAccess`
    - `CloudWatchFullAccess`
@@ -240,7 +239,7 @@ kubectl describe secret healthcare-api-db-secret -n healthcare-api
 
 # Test database connectivity from within cluster
 kubectl run -it --rm debug --image=postgres:15 --restart=Never -- bash
-psql $DB_URL
+psql "$DATABASE_URL"
 ```
 
 #### 3. Load Balancer Issues
@@ -324,7 +323,6 @@ enable_cloudtrail = false
 db_instance_class = "db.t3.medium"
 node_instance_types = ["t3.medium", "t3.large"]
 enable_backups = true
-redis_node_type = "cache.t3.small"
 ```
 
 ## Compliance and Auditing

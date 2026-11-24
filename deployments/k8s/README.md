@@ -34,8 +34,7 @@ in `secret.example.yaml`:
 kubectl create secret generic healthcare-api-secrets -n healthcare-api \
   --from-literal=DATABASE_URL='postgres://USER:PASSWORD@HOST:5432/healthhub?sslmode=require' \
   --from-literal=JWT_SECRET="$(openssl rand -base64 48)" \
-  --from-literal=ENCRYPTION_KEY="$(openssl rand -base64 32)" \
-  --from-literal=REDIS_URL='redis://HOST:6379'
+  --from-literal=ENCRYPTION_KEY="$(openssl rand -base64 32)"
 ```
 
 ### ConfigMap
@@ -44,7 +43,6 @@ Update `configmap.yaml` with your environment-specific settings:
 
 - `DB_HOST`: PostgreSQL host
 - `DB_PORT`: PostgreSQL port
-- `REDIS_HOST`: Redis host (optional)
 - `LOG_LEVEL`: Logging level (debug, info, warn, error)
 
 ### Ingress

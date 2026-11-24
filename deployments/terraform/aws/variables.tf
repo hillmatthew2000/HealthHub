@@ -128,31 +128,6 @@ variable "db_deletion_protection" {
   default     = true
 }
 
-# Redis Configuration
-variable "redis_node_type" {
-  description = "ElastiCache Redis node type"
-  type        = string
-  default     = "cache.t3.micro"
-}
-
-variable "redis_num_cache_nodes" {
-  description = "Number of cache nodes for Redis"
-  type        = number
-  default     = 1
-}
-
-variable "redis_parameter_group_name" {
-  description = "Parameter group name for Redis"
-  type        = string
-  default     = "default.redis7"
-}
-
-variable "redis_port" {
-  description = "Port for Redis"
-  type        = number
-  default     = 6379
-}
-
 # Application Configuration
 variable "app_image_tag" {
   description = "Docker image tag for the healthcare API"

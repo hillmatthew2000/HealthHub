@@ -14,13 +14,13 @@ resource "aws_prometheus_workspace" "main" {
 resource "aws_grafana_workspace" "main" {
   count = var.enable_grafana ? 1 : 0
 
-  name         = "${var.project_name}-${var.environment}-grafana"
-  description  = "Grafana workspace for ${var.project_name} ${var.environment}"
+  name                = "${var.project_name}-${var.environment}-grafana"
+  description         = "Grafana workspace for ${var.project_name} ${var.environment}"
   account_access_type = "CURRENT_ACCOUNT"
-  
+
   authentication_providers = ["AWS_SSO"]
-  permission_type         = "SERVICE_MANAGED"
-  
+  permission_type          = "SERVICE_MANAGED"
+
   data_sources = var.enable_prometheus ? ["PROMETHEUS"] : []
 
   tags = {
@@ -73,37 +73,17 @@ resource "aws_cloudwatch_dashboard" "main" {
         }
       },
       {
-        type   = "metric"
-        x      = 0
-        y      = 12
-        width  = 12
-        height = 6
-
-        properties = {
-          metrics = [
-            ["AWS/ElastiCache", "CPUUtilization", "CacheClusterId", aws_elasticache_cluster.redis.cluster_id],
-            [".", "CurrConnections", ".", "."],
-            [".", "NetworkBytesIn", ".", "."],
-            [".", "NetworkBytesOut", ".", "."]
-          ]
-          period = 300
-          stat   = "Average"
-          region = var.aws_region
-          title  = "Redis Metrics"
-        }
-      },
-      {
         type   = "log"
         x      = 0
-        y      = 18
+        y      = 12
         width  = 24
         height = 6
 
         properties = {
-          query   = "SOURCE '${aws_cloudwatch_log_group.app_logs.name}' | fields @timestamp, @message | sort @timestamp desc | limit 100"
-          region  = var.aws_region
-          title   = "Application Logs"
-          view    = "table"
+          query  = "SOURCE '${aws_cloudwatch_log_group.app_logs.name}' | fields @timestamp, @message | sort @timestamp desc | limit 100"
+          region = var.aws_region
+          title  = "Application Logs"
+          view   = "table"
         }
       }
     ]
@@ -151,28 +131,6 @@ resource "aws_cloudwatch_metric_alarm" "high_memory" {
 
   tags = {
     Name        = "${var.project_name}-${var.environment}-low-memory"
-    Environment = var.environment
-  }
-}
-
-resource "aws_cloudwatch_metric_alarm" "redis_high_cpu" {
-  alarm_name          = "${var.project_name}-${var.environment}-redis-high-cpu"
-  comparison_operator = "GreaterThanThreshold"
-  evaluation_periods  = "2"
-  metric_name         = "CPUUtilization"
-  namespace           = "AWS/ElastiCache"
-  period              = "300"
-  statistic           = "Average"
-  threshold           = "80"
-  alarm_description   = "This metric monitors Redis CPU utilization"
-  alarm_actions       = [aws_sns_topic.alerts.arn]
-
-  dimensions = {
-    CacheClusterId = aws_elasticache_cluster.redis.cluster_id
-  }
-
-  tags = {
-    Name        = "${var.project_name}-${var.environment}-redis-high-cpu"
     Environment = var.environment
   }
 }

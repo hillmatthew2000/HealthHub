@@ -1,344 +1,347 @@
-name: Infrastructure Management
+name: Infrastructure
 
 on:
   push:
     branches: [main]
-    paths: 
+    paths:
       - 'deployments/terraform/**'
+      - '.github/workflows/terraform.yml'
   pull_request:
     branches: [main]
     paths:
       - 'deployments/terraform/**'
+      - '.github/workflows/terraform.yml'
   workflow_dispatch:
     inputs:
       environment:
-        description: 'Environment to deploy'
+        description: 'Environment'
         required: true
         default: 'dev'
         type: choice
         options:
-        - dev
-        - staging
-        - prod
+          - dev
+          - staging
+          - prod
       action:
         description: 'Terraform action'
         required: true
         default: 'plan'
         type: choice
         options:
-        - plan
-        - apply
-        - destroy
+          - plan
+          - apply
+          - destroy
+
+permissions:
+  contents: read
+
+concurrency:
+  # Never run two Terraform jobs against the same state at once.
+  group: terraform-${{ github.event.inputs.environment || 'dev' }}
+  cancel-in-progress: false
 
 env:
   AWS_REGION: us-west-2
-  TF_VERSION: 1.6.0
+  TF_VERSION: 1.17.2
+  TF_IN_AUTOMATION: 'true'
 
 jobs:
-  terraform-validate:
+  validate:
+    name: Validate
     runs-on: ubuntu-latest
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Setup Terraform
-      uses: hashicorp/setup-terraform@v3
-      with:
-        terraform_version: ${{ env.TF_VERSION }}
-
-    - name: Terraform Format Check
-      run: |
-        cd deployments/terraform/aws
-        terraform fmt -check -recursive
-
-    - name: Terraform Init
-      run: |
-        cd deployments/terraform/aws
-        terraform init -backend=false
-
-    - name: Terraform Validate
-      run: |
-        cd deployments/terraform/aws
-        terraform validate
-
-    - name: Run tfsec security scan
-      uses: aquasecurity/tfsec-action@v1.0.3
-      with:
-        working_directory: deployments/terraform/aws
-
-  terraform-plan-dev:
-    runs-on: ubuntu-latest
-    needs: terraform-validate
-    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'dev')
-    environment: development
-
+    permissions:
+      contents: read
+      security-events: write
     defaults:
       run:
         working-directory: deployments/terraform/aws
-
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-    - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ${{ env.AWS_REGION }}
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
 
-    - name: Setup Terraform
-      uses: hashicorp/setup-terraform@v3
-      with:
-        terraform_version: ${{ env.TF_VERSION }}
+      - name: Format check
+        run: terraform fmt -check -recursive
 
-    - name: Terraform Init
-      run: |
-        terraform init \
-          -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
-          -backend-config="key=healthcare-api/dev/terraform.tfstate" \
-          -backend-config="region=${{ env.AWS_REGION }}" \
-          -backend-config="encrypt=true" \
-          -backend-config="dynamodb_table=${{ secrets.TF_LOCK_TABLE }}"
+      - name: Init
+        run: terraform init -backend=false -input=false
 
-    - name: Terraform Plan
-      id: plan
-      run: |
-        terraform plan \
-          -var="environment=dev" \
-          -var="aws_region=${{ env.AWS_REGION }}" \
-          -var="owner=${{ github.actor }}" \
-          -out=tfplan \
-          -no-color
+      - name: Validate
+        run: terraform validate
 
-    - name: Comment PR with plan
-      if: github.event_name == 'pull_request'
-      uses: actions/github-script@v7
-      with:
-        script: |
-          const output = `#### Terraform Plan 📖\`dev\`
-          
-          <details><summary>Show Plan</summary>
-          
-          \`\`\`terraform
-          ${{ steps.plan.outputs.stdout }}
-          \`\`\`
-          
-          </details>
-          
-          *Pusher: @${{ github.actor }}, Action: \`${{ github.event_name }}\`*`;
-          
-          github.rest.issues.createComment({
-            issue_number: context.issue.number,
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            body: output
-          })
+      # tfsec has been folded into Trivy. Findings are published to code
+      # scanning rather than failing the build; the remaining ones are
+      # deliberate design choices (public EKS endpoint, open egress).
+      - name: Trivy config scan
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: config
+          scan-ref: deployments/terraform/aws
+          severity: HIGH,CRITICAL
+          format: sarif
+          output: trivy-terraform.sarif
 
-    - name: Save plan artifact
-      uses: actions/upload-artifact@v3
-      with:
-        name: tfplan-dev
-        path: deployments/terraform/aws/tfplan
+      - name: Upload SARIF
+        if: always() && hashFiles('trivy-terraform.sarif') != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-terraform.sarif
+          category: trivy-terraform
 
-  terraform-apply-dev:
+  plan-dev:
+    name: Plan (dev)
     runs-on: ubuntu-latest
-    needs: terraform-plan-dev
-    if: github.ref == 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply' && github.event.inputs.environment == 'dev')
+    needs: validate
+    if: github.event_name != 'workflow_dispatch' || (github.event.inputs.environment == 'dev' && github.event.inputs.action != 'destroy')
     environment: development
-
+    permissions:
+      contents: read
+      pull-requests: write
     defaults:
       run:
         working-directory: deployments/terraform/aws
-
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-    - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ${{ env.AWS_REGION }}
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
 
-    - name: Setup Terraform
-      uses: hashicorp/setup-terraform@v3
-      with:
-        terraform_version: ${{ env.TF_VERSION }}
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
 
-    - name: Download plan artifact
-      uses: actions/download-artifact@v3
-      with:
-        name: tfplan-dev
-        path: deployments/terraform/aws/
-
-    - name: Terraform Init
-      run: |
-        terraform init \
-          -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
-          -backend-config="key=healthcare-api/dev/terraform.tfstate" \
-          -backend-config="region=${{ env.AWS_REGION }}" \
-          -backend-config="encrypt=true" \
+      - name: Init
+        run: >-
+          terraform init -input=false
+          -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}"
+          -backend-config="key=healthcare-api/dev/terraform.tfstate"
+          -backend-config="region=${{ env.AWS_REGION }}"
+          -backend-config="encrypt=true"
           -backend-config="dynamodb_table=${{ secrets.TF_LOCK_TABLE }}"
 
-    - name: Terraform Apply
-      run: terraform apply -auto-approve tfplan
+      - name: Plan
+        id: plan
+        run: >-
+          terraform plan -input=false -no-color -out=tfplan
+          -var="environment=dev"
+          -var="aws_region=${{ env.AWS_REGION }}"
+          -var="owner=${{ github.actor }}"
 
-    - name: Save Terraform outputs
-      id: outputs
-      run: |
-        echo "cluster_endpoint=$(terraform output -raw cluster_endpoint)" >> $GITHUB_OUTPUT
-        echo "ecr_repository_url=$(terraform output -raw ecr_repository_url)" >> $GITHUB_OUTPUT
+      - name: Comment plan on the pull request
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v9
+        env:
+          PLAN: ${{ steps.plan.outputs.stdout }}
+        with:
+          script: |
+            const plan = process.env.PLAN.length > 60000
+              ? process.env.PLAN.slice(0, 60000) + '\n... (truncated)'
+              : process.env.PLAN;
+            const body = [
+              '#### Terraform plan: `dev`',
+              '<details><summary>Show plan</summary>',
+              '',
+              '```terraform',
+              plan,
+              '```',
+              '</details>',
+            ].join('\n');
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body,
+            });
 
-  terraform-plan-prod:
+      - name: Save plan
+        uses: actions/upload-artifact@v7
+        with:
+          name: tfplan-dev
+          path: deployments/terraform/aws/tfplan
+          retention-days: 5
+
+  apply-dev:
+    name: Apply (dev)
     runs-on: ubuntu-latest
-    needs: terraform-validate
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'prod'
+    needs: plan-dev
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply')
+    environment: development
+    defaults:
+      run:
+        working-directory: deployments/terraform/aws
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Download plan
+        uses: actions/download-artifact@v8
+        with:
+          name: tfplan-dev
+          path: deployments/terraform/aws/
+
+      - name: Init
+        run: >-
+          terraform init -input=false
+          -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}"
+          -backend-config="key=healthcare-api/dev/terraform.tfstate"
+          -backend-config="region=${{ env.AWS_REGION }}"
+          -backend-config="encrypt=true"
+          -backend-config="dynamodb_table=${{ secrets.TF_LOCK_TABLE }}"
+
+      - name: Apply
+        run: terraform apply -input=false -auto-approve tfplan
+
+  plan-prod:
+    name: Plan (prod)
+    runs-on: ubuntu-latest
+    needs: validate
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'prod' && github.event.inputs.action != 'destroy'
     environment: production
-
     defaults:
       run:
         working-directory: deployments/terraform/aws
-
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-    - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_PROD }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_PROD }}
-        aws-region: ${{ env.AWS_REGION }}
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_PROD }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_PROD }}
+          aws-region: ${{ env.AWS_REGION }}
 
-    - name: Setup Terraform
-      uses: hashicorp/setup-terraform@v3
-      with:
-        terraform_version: ${{ env.TF_VERSION }}
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
 
-    - name: Terraform Init
-      run: |
-        terraform init \
-          -backend-config="bucket=${{ secrets.TF_STATE_BUCKET_PROD }}" \
-          -backend-config="key=healthcare-api/prod/terraform.tfstate" \
-          -backend-config="region=${{ env.AWS_REGION }}" \
-          -backend-config="encrypt=true" \
+      - name: Init
+        run: >-
+          terraform init -input=false
+          -backend-config="bucket=${{ secrets.TF_STATE_BUCKET_PROD }}"
+          -backend-config="key=healthcare-api/prod/terraform.tfstate"
+          -backend-config="region=${{ env.AWS_REGION }}"
+          -backend-config="encrypt=true"
           -backend-config="dynamodb_table=${{ secrets.TF_LOCK_TABLE_PROD }}"
 
-    - name: Terraform Plan
-      run: |
-        terraform plan \
-          -var="environment=prod" \
-          -var="aws_region=${{ env.AWS_REGION }}" \
-          -var="owner=${{ github.actor }}" \
-          -var="enable_waf=true" \
-          -var="enable_cloudtrail=true" \
-          -var="enable_guardduty=true" \
-          -var="enable_backups=true" \
-          -var="db_deletion_protection=true" \
-          -out=tfplan-prod
+      - name: Plan
+        run: >-
+          terraform plan -input=false -out=tfplan-prod
+          -var="environment=prod"
+          -var="aws_region=${{ env.AWS_REGION }}"
+          -var="owner=${{ github.actor }}"
+          -var="enable_waf=true"
+          -var="enable_cloudtrail=true"
+          -var="enable_guardduty=true"
+          -var="enable_backups=true"
+          -var="db_deletion_protection=true"
 
-    - name: Save plan artifact
-      uses: actions/upload-artifact@v3
-      with:
-        name: tfplan-prod
-        path: deployments/terraform/aws/tfplan-prod
+      - name: Save plan
+        uses: actions/upload-artifact@v7
+        with:
+          name: tfplan-prod
+          path: deployments/terraform/aws/tfplan-prod
+          retention-days: 5
 
-  terraform-apply-prod:
+  apply-prod:
+    name: Apply (prod)
     runs-on: ubuntu-latest
-    needs: terraform-plan-prod
+    needs: plan-prod
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply' && github.event.inputs.environment == 'prod'
     environment: production
-
     defaults:
       run:
         working-directory: deployments/terraform/aws
-
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-    - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_PROD }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_PROD }}
-        aws-region: ${{ env.AWS_REGION }}
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_PROD }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_PROD }}
+          aws-region: ${{ env.AWS_REGION }}
 
-    - name: Setup Terraform
-      uses: hashicorp/setup-terraform@v3
-      with:
-        terraform_version: ${{ env.TF_VERSION }}
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
 
-    - name: Download plan artifact
-      uses: actions/download-artifact@v3
-      with:
-        name: tfplan-prod
-        path: deployments/terraform/aws/
+      - name: Download plan
+        uses: actions/download-artifact@v8
+        with:
+          name: tfplan-prod
+          path: deployments/terraform/aws/
 
-    - name: Terraform Init
-      run: |
-        terraform init \
-          -backend-config="bucket=${{ secrets.TF_STATE_BUCKET_PROD }}" \
-          -backend-config="key=healthcare-api/prod/terraform.tfstate" \
-          -backend-config="region=${{ env.AWS_REGION }}" \
-          -backend-config="encrypt=true" \
+      - name: Init
+        run: >-
+          terraform init -input=false
+          -backend-config="bucket=${{ secrets.TF_STATE_BUCKET_PROD }}"
+          -backend-config="key=healthcare-api/prod/terraform.tfstate"
+          -backend-config="region=${{ env.AWS_REGION }}"
+          -backend-config="encrypt=true"
           -backend-config="dynamodb_table=${{ secrets.TF_LOCK_TABLE_PROD }}"
 
-    - name: Terraform Apply
-      run: terraform apply -auto-approve tfplan-prod
+      - name: Apply
+        run: terraform apply -input=false -auto-approve tfplan-prod
 
-    - name: Notify Slack
-      uses: 8398a7/action-slack@v3
-      with:
-        status: ${{ job.status }}
-        channel: '#infrastructure'
-        webhook_url: ${{ secrets.SLACK_WEBHOOK }}
-        text: |
-          Production infrastructure deployment completed!
-          Environment: ${{ github.event.inputs.environment }}
-          Action: ${{ github.event.inputs.action }}
-          Actor: ${{ github.actor }}
-      if: always()
+      - name: Notify Slack
+        if: always()
+        continue-on-error: true
+        uses: slackapi/slack-github-action@v4
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK }}
+          webhook-type: incoming-webhook
+          payload: |
+            text: "Production infrastructure apply by ${{ github.actor }}: ${{ job.status }}"
 
-  terraform-destroy:
+  destroy:
+    name: Destroy
     runs-on: ubuntu-latest
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy'
-    environment: ${{ github.event.inputs.environment }}
-
+    environment: ${{ github.event.inputs.environment == 'prod' && 'production' || 'development' }}
     defaults:
       run:
         working-directory: deployments/terraform/aws
-
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-    - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ${{ env.AWS_REGION }}
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ github.event.inputs.environment == 'prod' && secrets.AWS_ACCESS_KEY_ID_PROD || secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ github.event.inputs.environment == 'prod' && secrets.AWS_SECRET_ACCESS_KEY_PROD || secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
 
-    - name: Setup Terraform
-      uses: hashicorp/setup-terraform@v3
-      with:
-        terraform_version: ${{ env.TF_VERSION }}
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
 
-    - name: Terraform Init
-      run: |
-        terraform init \
-          -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
-          -backend-config="key=healthcare-api/${{ github.event.inputs.environment }}/terraform.tfstate" \
-          -backend-config="region=${{ env.AWS_REGION }}" \
-          -backend-config="encrypt=true" \
-          -backend-config="dynamodb_table=${{ secrets.TF_LOCK_TABLE }}"
+      - name: Init
+        run: >-
+          terraform init -input=false
+          -backend-config="bucket=${{ github.event.inputs.environment == 'prod' && secrets.TF_STATE_BUCKET_PROD || secrets.TF_STATE_BUCKET }}"
+          -backend-config="key=healthcare-api/${{ github.event.inputs.environment }}/terraform.tfstate"
+          -backend-config="region=${{ env.AWS_REGION }}"
+          -backend-config="encrypt=true"
+          -backend-config="dynamodb_table=${{ github.event.inputs.environment == 'prod' && secrets.TF_LOCK_TABLE_PROD || secrets.TF_LOCK_TABLE }}"
 
-    - name: Terraform Destroy
-      run: |
-        terraform destroy \
-          -var="environment=${{ github.event.inputs.environment }}" \
-          -var="aws_region=${{ env.AWS_REGION }}" \
-          -auto-approve
+      - name: Destroy
+        run: >-
+          terraform destroy -input=false -auto-approve
+          -var="environment=${{ github.event.inputs.environment }}"
+          -var="aws_region=${{ env.AWS_REGION }}"

@@ -7,7 +7,7 @@ data "aws_caller_identity" "current" {}
 
 # VPC Module
 module "vpc" {
-  source = "terraform-aws-modules/vpc/aws"
+  source  = "terraform-aws-modules/vpc/aws"
   version = "~> 5.0"
 
   name = "${var.project_name}-${var.environment}-vpc"
@@ -55,7 +55,7 @@ module "eks" {
   cluster_endpoint_public_access = true
 
   # Encryption configuration
-  kms_key_description = "EKS Secret Encryption Key"
+  kms_key_description             = "EKS Secret Encryption Key"
   kms_key_deletion_window_in_days = 7
 
   cluster_encryption_config = {
@@ -86,10 +86,10 @@ module "eks" {
       vpc_security_group_ids = [aws_security_group.eks_nodes.id]
 
       # Node group configuration
-      ami_type       = "AL2_x86_64"
-      disk_size      = 50
-      disk_type      = "gp3"
-      
+      ami_type  = "AL2_x86_64"
+      disk_size = 50
+      disk_type = "gp3"
+
       labels = {
         Environment = var.environment
         NodeGroup   = "main"

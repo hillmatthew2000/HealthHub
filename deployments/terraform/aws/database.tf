@@ -40,30 +40,6 @@ resource "aws_security_group" "rds" {
   }
 }
 
-resource "aws_security_group" "redis" {
-  name_prefix = "${var.project_name}-${var.environment}-redis-"
-  vpc_id      = module.vpc.vpc_id
-
-  ingress {
-    from_port   = var.redis_port
-    to_port     = var.redis_port
-    protocol    = "tcp"
-    cidr_blocks = [var.vpc_cidr]
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  tags = {
-    Name        = "${var.project_name}-${var.environment}-redis-sg"
-    Environment = var.environment
-  }
-}
-
 resource "aws_security_group" "eks_nodes" {
   name_prefix = "${var.project_name}-${var.environment}-eks-nodes-"
   vpc_id      = module.vpc.vpc_id
@@ -173,7 +149,7 @@ resource "aws_db_instance" "postgres" {
   max_allocated_storage = var.db_max_allocated_storage
   storage_type          = "gp3"
   storage_encrypted     = true
-  kms_key_id           = aws_kms_key.main.arn
+  kms_key_id            = aws_kms_key.main.arn
 
   db_name  = "healthhub"
   username = "healthhub_admin"
@@ -184,11 +160,11 @@ resource "aws_db_instance" "postgres" {
   parameter_group_name   = aws_db_parameter_group.postgres.name
 
   backup_retention_period = var.db_backup_retention_period
-  backup_window          = var.db_backup_window
-  maintenance_window     = var.db_maintenance_window
-  
-  deletion_protection = var.db_deletion_protection
-  skip_final_snapshot = false
+  backup_window           = var.db_backup_window
+  maintenance_window      = var.db_maintenance_window
+
+  deletion_protection       = var.db_deletion_protection
+  skip_final_snapshot       = false
   final_snapshot_identifier = "${var.project_name}-${var.environment}-postgres-final-snapshot-${formatdate("YYYY-MM-DD-hhmm", timestamp())}"
 
   # Enhanced monitoring
@@ -196,8 +172,8 @@ resource "aws_db_instance" "postgres" {
   monitoring_role_arn = aws_iam_role.rds_enhanced_monitoring.arn
 
   # Performance insights
-  performance_insights_enabled = true
-  performance_insights_kms_key_id = aws_kms_key.main.arn
+  performance_insights_enabled          = true
+  performance_insights_kms_key_id       = aws_kms_key.main.arn
   performance_insights_retention_period = 7
 
   # Enable automated backups
@@ -205,43 +181,6 @@ resource "aws_db_instance" "postgres" {
 
   tags = {
     Name        = "${var.project_name}-${var.environment}-postgres"
-    Environment = var.environment
-  }
-}
-
-# Redis Subnet Group
-resource "aws_elasticache_subnet_group" "redis" {
-  name       = "${var.project_name}-${var.environment}-redis-subnet-group"
-  subnet_ids = module.vpc.private_subnets
-
-  tags = {
-    Name        = "${var.project_name}-${var.environment}-redis-subnet-group"
-    Environment = var.environment
-  }
-}
-
-# Redis Cluster
-resource "aws_elasticache_cluster" "redis" {
-  cluster_id           = "${var.project_name}-${var.environment}-redis"
-  engine               = "redis"
-  node_type            = var.redis_node_type
-  num_cache_nodes      = var.redis_num_cache_nodes
-  parameter_group_name = var.redis_parameter_group_name
-  port                 = var.redis_port
-  subnet_group_name    = aws_elasticache_subnet_group.redis.name
-  security_group_ids   = [aws_security_group.redis.id]
-
-  # Enable encryption
-  at_rest_encryption_enabled = true
-  transit_encryption_enabled = true
-  kms_key_id                 = aws_kms_key.main.arn
-
-  # Backup configuration
-  snapshot_retention_limit = 5
-  snapshot_window          = "03:00-05:00"
-
-  tags = {
-    Name        = "${var.project_name}-${var.environment}-redis"
     Environment = var.environment
   }
 }

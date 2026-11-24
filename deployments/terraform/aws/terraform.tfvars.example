@@ -24,10 +24,6 @@ db_max_allocated_storage    = 50
 db_backup_retention_period  = 3
 db_deletion_protection      = false
 
-# Redis Configuration
-redis_node_type        = "cache.t3.micro"
-redis_num_cache_nodes  = 1
-
 # Application Configuration
 app_image_tag      = "latest"
 app_replicas       = 2
