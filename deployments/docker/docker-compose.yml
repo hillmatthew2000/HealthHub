@@ -1,76 +1,53 @@
-version: '3.8'
-
+# Local development stack: the API and PostgreSQL.
+#
+#   docker compose -f deployments/docker/docker-compose.yml up --build
+#
+# The secrets below are development-only defaults; the server refuses them
+# in any other ENVIRONMENT. Override them through the environment or an
+# .env file next to this one. The database is reachable only from the API
+# container; nothing but the API port is published, and only on localhost.
 services:
   api:
     build:
       context: ../..
       dockerfile: deployments/docker/Dockerfile
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     environment:
-      - DATABASE_URL=postgresql://postgres:password@db:5432/healthcare_api?sslmode=disable
-      - JWT_SECRET=your-super-secret-jwt-key-change-in-production-make-it-at-least-32-chars
-      - ENCRYPTION_KEY=your-32-byte-encryption-key-change-this-in-production
-      - REDIS_URL=redis://redis:6379
-      - ENVIRONMENT=development
-      - LOG_LEVEL=debug
-      - ALLOWED_ORIGINS=*
-      - RATE_LIMIT_ENABLED=true
-      - RATE_LIMIT_RPM=100
+      ENVIRONMENT: development
+      LOG_LEVEL: debug
+      DATABASE_URL: postgres://healthhub:${POSTGRES_PASSWORD:-healthhub-dev}@db:5432/healthhub?sslmode=disable
+      JWT_SECRET: ${JWT_SECRET:-dev-only-jwt-secret-do-not-use-in-production-0123456789}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-your-32-byte-encryption-key-change-this-in-production}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000}
+      ALLOW_REGISTRATION: ${ALLOW_REGISTRATION:-false}
     depends_on:
-      - db
-      - redis
+      db:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "/app/main", "-health-check"]
-      interval: 30s
-      timeout: 10s
+      test: ["CMD", "/healthhub", "healthcheck"]
+      interval: 15s
+      timeout: 5s
       retries: 3
-      start_period: 40s
+      start_period: 20s
 
   db:
-    image: postgres:15-alpine
+    image: postgres:18-alpine
     environment:
-      - POSTGRES_DB=healthcare_api
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=password
-    ports:
-      - "5432:5432"
+      POSTGRES_DB: healthhub
+      POSTGRES_USER: healthhub
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-healthhub-dev}
     volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+      # PostgreSQL 18 images keep their data in a versioned directory below
+      # /var/lib/postgresql.
+      - postgres_data:/var/lib/postgresql
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 10s
+      test: ["CMD-SHELL", "pg_isready -U healthhub -d healthhub"]
+      interval: 5s
       timeout: 5s
-      retries: 5
-
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
-
-  nginx:
-    image: nginx:alpine
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./ssl:/etc/nginx/ssl:ro
-    depends_on:
-      - api
-    restart: unless-stopped
+      retries: 10
 
 volumes:
   postgres_data:
-  redis_data:

@@ -1,4 +1,4 @@
-name: Build and Deploy Healthcare API
+name: CI and Deploy
 
 on:
   push:
@@ -6,276 +6,273 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Each environment has its own ECR repository and EKS cluster, created by
+# Terraform as <project>-<environment> and <project>-<environment>-eks.
+# Pushes to develop deploy to dev and pushes to main to prod.
 env:
   AWS_REGION: us-west-2
-  ECR_REPOSITORY: healthhub-dev
-  EKS_CLUSTER_NAME: healthhub-dev-eks
+  GOLANGCI_LINT_VERSION: v2.12.2
+  GOSEC_VERSION: v2.29.0
 
 jobs:
   test:
+    name: Test
     runs-on: ubuntu-latest
+    # Runs the repository integration tests; without the database URL they
+    # are skipped and the unit tests still pass.
     services:
       postgres:
-        image: postgres:15
+        image: postgres:18
         env:
-          POSTGRES_PASSWORD: testpass
-          POSTGRES_USER: testuser
+          POSTGRES_USER: healthhub
+          POSTGRES_PASSWORD: healthhub
           POSTGRES_DB: healthhub_test
         options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
+          --health-cmd "pg_isready -U healthhub"
+          --health-interval 5s
           --health-timeout 5s
-          --health-retries 5
+          --health-retries 10
         ports:
           - 5432:5432
-      
-      redis:
-        image: redis:7
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        ports:
-          - 6379:6379
-
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-    - name: Set up Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: '1.21'
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
 
-    - name: Cache Go modules
-      uses: actions/cache@v3
-      with:
-        path: |
-          ~/.cache/go-build
-          ~/go/pkg/mod
-        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
-        restore-keys: |
-          ${{ runner.os }}-go-
+      - name: Check formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
 
-    - name: Download dependencies
-      run: go mod download
+      - name: Vet
+        run: go vet ./...
 
-    - name: Run tests
-      env:
-        DB_URL: postgresql://testuser:testpass@localhost:5432/healthhub_test?sslmode=disable
-        REDIS_URL: redis://localhost:6379
-        JWT_SECRET: test-jwt-secret-key
-        ENCRYPTION_KEY: test-encryption-key-32-bytes-long
-        ENVIRONMENT: test
-        LOG_LEVEL: debug
-      run: |
-        go test -v -race -coverprofile=coverage.out ./...
+      - name: Test
+        env:
+          HEALTHHUB_TEST_DATABASE_URL: postgres://healthhub:healthhub@localhost:5432/healthhub_test?sslmode=disable
+        run: go test -race -coverprofile=coverage.out ./...
 
-    - name: Upload coverage reports
-      uses: codecov/codecov-action@v3
-      with:
-        token: ${{ secrets.CODECOV_TOKEN }}
-        file: ./coverage.out
-        flags: unittests
-        name: codecov-umbrella
-
-    - name: Run security scan
-      uses: securecodewarrior/github-action-gosec@master
-      with:
-        args: -fmt sarif -out gosec.sarif ./...
-
-    - name: Upload SARIF file
-      uses: github/codeql-action/upload-sarif@v2
-      with:
-        sarif_file: gosec.sarif
+      - name: Upload coverage
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage.out
+          flags: unittests
 
   lint:
+    name: Lint
     runs-on: ubuntu-latest
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-    - name: Set up Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: '1.21'
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
 
-    - name: Run golangci-lint
-      uses: golangci/golangci-lint-action@v3
-      with:
-        version: latest
-        args: --timeout=5m
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
+
+  gosec:
+    name: Security scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # Writes SARIF for code scanning and a text report to the log, and
+      # fails the job when gosec reports an issue.
+      - name: Run gosec
+        run: >-
+          go run github.com/securego/gosec/v2/cmd/gosec@${GOSEC_VERSION}
+          -fmt sarif -out gosec.sarif -stdout -verbose text ./...
+
+      - name: Upload SARIF
+        # Pull requests from forks get a read-only token.
+        if: always() && hashFiles('gosec.sarif') != '' && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository)
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: gosec.sarif
+          category: gosec
 
   build:
+    name: Build image
     runs-on: ubuntu-latest
-    needs: [test, lint]
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
-    
+    needs: [test, lint, gosec]
+    if: github.event_name == 'push'
+    permissions:
+      contents: read
+      security-events: write
     outputs:
-      image-tag: ${{ steps.meta.outputs.tags }}
-      image-digest: ${{ steps.build.outputs.digest }}
-
+      digest: ${{ steps.build.outputs.digest }}
+      repository: ${{ steps.target.outputs.repository }}
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-    - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ${{ env.AWS_REGION }}
+      - name: Select target environment
+        id: target
+        run: |
+          if [ "$GITHUB_REF" = "refs/heads/main" ]; then
+            echo "repository=healthhub-prod" >> "$GITHUB_OUTPUT"
+          else
+            echo "repository=healthhub-dev" >> "$GITHUB_OUTPUT"
+          fi
 
-    - name: Login to Amazon ECR
-      id: login-ecr
-      uses: aws-actions/amazon-ecr-login@v2
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
 
-    - name: Extract metadata
-      id: meta
-      uses: docker/metadata-action@v5
-      with:
-        images: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}
-        tags: |
-          type=ref,event=branch
-          type=ref,event=pr
-          type=sha,prefix={{branch}}-
-          type=raw,value=latest,enable={{is_default_branch}}
+      - name: Log in to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
 
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ steps.ecr.outputs.registry }}/${{ steps.target.outputs.repository }}
+          # The repositories have immutable tags, so every run pushes a tag
+          # of its own; re-runs get a new one. Deployments use the digest.
+          tags: |
+            type=sha,format=long,suffix=-${{ github.run_attempt }}
 
-    - name: Build and push Docker image
-      id: build
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        platforms: linux/amd64
-        push: true
-        tags: ${{ steps.meta.outputs.tags }}
-        labels: ${{ steps.meta.outputs.labels }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
-        build-args: |
-          VERSION=${{ github.sha }}
-          BUILD_TIME=${{ github.event.head_commit.timestamp }}
+      - uses: docker/setup-buildx-action@v4
 
-    - name: Run Trivy vulnerability scanner
-      uses: aquasecurity/trivy-action@master
-      with:
-        image-ref: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
-        format: 'sarif'
-        output: 'trivy-results.sarif'
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: deployments/docker/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            VERSION=${{ github.sha }}
 
-    - name: Upload Trivy scan results
-      uses: github/codeql-action/upload-sarif@v2
-      with:
-        sarif_file: 'trivy-results.sarif'
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ steps.ecr.outputs.registry }}/${{ steps.target.outputs.repository }}@${{ steps.build.outputs.digest }}
+          format: sarif
+          output: trivy-results.sarif
+
+      - name: Upload Trivy results
+        if: always() && hashFiles('trivy-results.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy
 
   deploy-dev:
+    name: Deploy (development)
     runs-on: ubuntu-latest
     needs: build
     if: github.ref == 'refs/heads/develop'
     environment: development
-    
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-    - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ${{ env.AWS_REGION }}
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
 
-    - name: Update kubeconfig
-      run: |
-        aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+      - name: Log in to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
 
-    - name: Deploy to Kubernetes
-      run: |
-        # Update the image tag in the deployment
-        kubectl set image deployment/healthcare-api healthcare-api=${{ needs.build.outputs.image-tag }} -n healthcare-api
-        
-        # Wait for rollout to complete
-        kubectl rollout status deployment/healthcare-api -n healthcare-api --timeout=300s
-        
-        # Verify deployment
-        kubectl get pods -n healthcare-api
-        kubectl get svc -n healthcare-api
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --region "$AWS_REGION" --name healthhub-dev-eks
 
-    - name: Run smoke tests
-      run: |
-        # Get the load balancer URL
-        LB_URL=$(kubectl get svc healthcare-api-service -n healthcare-api -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
-        
-        # Wait for load balancer to be ready
-        echo "Waiting for load balancer to be ready..."
-        sleep 60
-        
-        # Run basic health checks
-        curl -f http://$LB_URL/health || exit 1
-        echo "Health check passed!"
+      # Deploy by digest so the rollout runs exactly the image that was
+      # built and scanned above.
+      - name: Deploy
+        env:
+          IMAGE: ${{ steps.ecr.outputs.registry }}/${{ needs.build.outputs.repository }}@${{ needs.build.outputs.digest }}
+        working-directory: deployments/k8s
+        run: |
+          kustomize edit set image healthcare-api="$IMAGE"
+          kubectl apply -k .
+          kubectl rollout status deployment/healthcare-api -n healthcare-api --timeout=300s
+
+      - name: Smoke test
+        run: |
+          kubectl run smoke-test --rm -i --restart=Never -n healthcare-api \
+            --image=curlimages/curl:8.23.0 -- \
+            curl -fsS http://healthcare-api-service/health/ready
 
   deploy-prod:
+    name: Deploy (production)
     runs-on: ubuntu-latest
     needs: build
     if: github.ref == 'refs/heads/main'
     environment: production
-    
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-    - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ${{ env.AWS_REGION }}
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
 
-    - name: Update kubeconfig
-      run: |
-        aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name healthhub-prod-eks
+      - name: Log in to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
 
-    - name: Deploy to Production
-      run: |
-        # Blue-green deployment strategy
-        kubectl apply -f deployments/k8s/ -n healthcare-api
-        
-        # Update the image tag
-        kubectl set image deployment/healthcare-api healthcare-api=${{ needs.build.outputs.image-tag }} -n healthcare-api
-        
-        # Wait for rollout
-        kubectl rollout status deployment/healthcare-api -n healthcare-api --timeout=600s
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --region "$AWS_REGION" --name healthhub-prod-eks
 
-    - name: Production smoke tests
-      run: |
-        LB_URL=$(kubectl get svc healthcare-api-service -n healthcare-api -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
-        
-        # More comprehensive health checks for production
-        curl -f https://$LB_URL/health || exit 1
-        curl -f https://$LB_URL/health/ready || exit 1
-        echo "Production deployment verified!"
+      - name: Deploy
+        env:
+          IMAGE: ${{ steps.ecr.outputs.registry }}/${{ needs.build.outputs.repository }}@${{ needs.build.outputs.digest }}
+        working-directory: deployments/k8s
+        run: |
+          kustomize edit set image healthcare-api="$IMAGE"
+          kubectl apply -k .
+          kubectl rollout status deployment/healthcare-api -n healthcare-api --timeout=600s
 
-    - name: Notify deployment
-      uses: 8398a7/action-slack@v3
-      with:
-        status: ${{ job.status }}
-        channel: '#deployments'
-        webhook_url: ${{ secrets.SLACK_WEBHOOK }}
-      if: always()
+      - name: Smoke test
+        run: |
+          kubectl run smoke-test --rm -i --restart=Never -n healthcare-api \
+            --image=curlimages/curl:8.23.0 -- \
+            curl -fsS http://healthcare-api-service/health/ready
 
-  security-scan:
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Run OWASP ZAP Baseline Scan
-      uses: zaproxy/action-baseline@v0.10.0
-      with:
-        target: 'http://localhost:8080'
+      - name: Notify Slack
+        if: always()
+        continue-on-error: true
+        uses: slackapi/slack-github-action@v4
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK }}
+          webhook-type: incoming-webhook
+          payload: |
+            text: "Production deploy of ${{ github.sha }}: ${{ job.status }}"

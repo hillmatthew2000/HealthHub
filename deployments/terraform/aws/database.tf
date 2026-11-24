@@ -3,12 +3,78 @@ resource "aws_kms_key" "main" {
   description             = "KMS key for ${var.project_name}-${var.environment}"
   deletion_window_in_days = 7
   enable_key_rotation     = true
+  policy                  = data.aws_iam_policy_document.kms_main.json
 
   tags = {
     Name        = "${var.project_name}-${var.environment}-kms"
     Environment = var.environment
   }
 }
+
+# The account keeps full control of the key through IAM. AWS services that
+# encrypt with it on their own behalf (rather than through a caller's IAM
+# permissions) must also be named in the key policy: CloudWatch Logs for the
+# encrypted log groups, CloudWatch alarms publishing to the encrypted SNS
+# topic, and CloudTrail for the trail.
+data "aws_iam_policy_document" "kms_main" {
+  statement {
+    sid       = "AccountAdministration"
+    actions   = ["kms:*"]
+    resources = ["*"]
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:root"]
+    }
+  }
+
+  statement {
+    sid = "CloudWatchLogs"
+    actions = [
+      "kms:Encrypt*",
+      "kms:Decrypt*",
+      "kms:ReEncrypt*",
+      "kms:GenerateDataKey*",
+      "kms:Describe*",
+    ]
+    resources = ["*"]
+    principals {
+      type        = "Service"
+      identifiers = ["logs.${var.aws_region}.amazonaws.com"]
+    }
+    condition {
+      test     = "ArnLike"
+      variable = "kms:EncryptionContext:aws:logs:arn"
+      values   = ["arn:${data.aws_partition.current.partition}:logs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:*"]
+    }
+  }
+
+  statement {
+    sid       = "CloudWatchAlarmsToSNS"
+    actions   = ["kms:Decrypt", "kms:GenerateDataKey*"]
+    resources = ["*"]
+    principals {
+      type        = "Service"
+      identifiers = ["cloudwatch.amazonaws.com"]
+    }
+  }
+
+  statement {
+    sid       = "CloudTrail"
+    actions   = ["kms:GenerateDataKey*", "kms:DescribeKey"]
+    resources = ["*"]
+    principals {
+      type        = "Service"
+      identifiers = ["cloudtrail.amazonaws.com"]
+    }
+    condition {
+      test     = "StringLike"
+      variable = "kms:EncryptionContext:aws:cloudtrail:arn"
+      values   = ["arn:${data.aws_partition.current.partition}:cloudtrail:*:${data.aws_caller_identity.current.account_id}:trail/*"]
+    }
+  }
+}
+
+data "aws_partition" "current" {}
 
 resource "aws_kms_alias" "main" {
   name          = "alias/${var.project_name}-${var.environment}"
@@ -36,30 +102,6 @@ resource "aws_security_group" "rds" {
 
   tags = {
     Name        = "${var.project_name}-${var.environment}-rds-sg"
-    Environment = var.environment
-  }
-}
-
-resource "aws_security_group" "redis" {
-  name_prefix = "${var.project_name}-${var.environment}-redis-"
-  vpc_id      = module.vpc.vpc_id
-
-  ingress {
-    from_port   = var.redis_port
-    to_port     = var.redis_port
-    protocol    = "tcp"
-    cidr_blocks = [var.vpc_cidr]
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  tags = {
-    Name        = "${var.project_name}-${var.environment}-redis-sg"
     Environment = var.environment
   }
 }
@@ -159,6 +201,8 @@ resource "aws_db_parameter_group" "postgres" {
 resource "random_password" "db_password" {
   length  = 32
   special = true
+  # RDS rejects "/", "@", '"' and spaces in master passwords.
+  override_special = "!#$%&*()-_=+[]{}<>:?"
 }
 
 # RDS Instance
@@ -173,7 +217,7 @@ resource "aws_db_instance" "postgres" {
   max_allocated_storage = var.db_max_allocated_storage
   storage_type          = "gp3"
   storage_encrypted     = true
-  kms_key_id           = aws_kms_key.main.arn
+  kms_key_id            = aws_kms_key.main.arn
 
   db_name  = "healthhub"
   username = "healthhub_admin"
@@ -184,11 +228,11 @@ resource "aws_db_instance" "postgres" {
   parameter_group_name   = aws_db_parameter_group.postgres.name
 
   backup_retention_period = var.db_backup_retention_period
-  backup_window          = var.db_backup_window
-  maintenance_window     = var.db_maintenance_window
-  
-  deletion_protection = var.db_deletion_protection
-  skip_final_snapshot = false
+  backup_window           = var.db_backup_window
+  maintenance_window      = var.db_maintenance_window
+
+  deletion_protection       = var.db_deletion_protection
+  skip_final_snapshot       = false
   final_snapshot_identifier = "${var.project_name}-${var.environment}-postgres-final-snapshot-${formatdate("YYYY-MM-DD-hhmm", timestamp())}"
 
   # Enhanced monitoring
@@ -196,8 +240,8 @@ resource "aws_db_instance" "postgres" {
   monitoring_role_arn = aws_iam_role.rds_enhanced_monitoring.arn
 
   # Performance insights
-  performance_insights_enabled = true
-  performance_insights_kms_key_id = aws_kms_key.main.arn
+  performance_insights_enabled          = true
+  performance_insights_kms_key_id       = aws_kms_key.main.arn
   performance_insights_retention_period = 7
 
   # Enable automated backups
@@ -205,43 +249,6 @@ resource "aws_db_instance" "postgres" {
 
   tags = {
     Name        = "${var.project_name}-${var.environment}-postgres"
-    Environment = var.environment
-  }
-}
-
-# Redis Subnet Group
-resource "aws_elasticache_subnet_group" "redis" {
-  name       = "${var.project_name}-${var.environment}-redis-subnet-group"
-  subnet_ids = module.vpc.private_subnets
-
-  tags = {
-    Name        = "${var.project_name}-${var.environment}-redis-subnet-group"
-    Environment = var.environment
-  }
-}
-
-# Redis Cluster
-resource "aws_elasticache_cluster" "redis" {
-  cluster_id           = "${var.project_name}-${var.environment}-redis"
-  engine               = "redis"
-  node_type            = var.redis_node_type
-  num_cache_nodes      = var.redis_num_cache_nodes
-  parameter_group_name = var.redis_parameter_group_name
-  port                 = var.redis_port
-  subnet_group_name    = aws_elasticache_subnet_group.redis.name
-  security_group_ids   = [aws_security_group.redis.id]
-
-  # Enable encryption
-  at_rest_encryption_enabled = true
-  transit_encryption_enabled = true
-  kms_key_id                 = aws_kms_key.main.arn
-
-  # Backup configuration
-  snapshot_retention_limit = 5
-  snapshot_window          = "03:00-05:00"
-
-  tags = {
-    Name        = "${var.project_name}-${var.environment}-redis"
     Environment = var.environment
   }
 }

@@ -17,6 +17,12 @@ The monitoring stack includes:
 # Create monitoring namespace and deploy Prometheus
 kubectl apply -f prometheus.yaml
 
+# Grafana reads its admin password and signing key from a Secret, which is
+# never committed. Create it once:
+kubectl create secret generic grafana-admin -n monitoring \
+  --from-literal=admin-password="$(openssl rand -base64 24)" \
+  --from-literal=secret-key="$(openssl rand -hex 32)"
+
 # Deploy Grafana with pre-configured dashboards
 kubectl apply -f grafana.yaml
 
@@ -31,8 +37,8 @@ kubectl get services -n monitoring
 # Port forward to access Grafana locally
 kubectl port-forward service/grafana-service 3000:3000 -n monitoring
 
-# Open browser to http://localhost:3000
-# Default credentials: admin/admin123
+# Open browser to http://localhost:3000 and sign in as "admin" with the
+# password stored in the grafana-admin Secret.
 ```
 
 ### 3. Access Prometheus
@@ -153,7 +159,8 @@ Prometheus is configured to scrape:
 ## Security Considerations
 
 ### Authentication
-- Grafana requires username/password (changeable)
+- Grafana's admin password and secret key come from the `grafana-admin`
+  Secret, which is created out of band (see Quick Setup) and never committed
 - Prometheus has no built-in authentication (use ingress/proxy)
 
 ### Network Security

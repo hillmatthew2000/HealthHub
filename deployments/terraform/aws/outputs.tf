@@ -89,29 +89,6 @@ output "db_subnet_group_name" {
   value       = aws_db_subnet_group.postgres.name
 }
 
-# Redis Outputs
-output "redis_cluster_id" {
-  description = "ElastiCache Redis cluster ID"
-  value       = aws_elasticache_subnet_group.redis.name
-}
-
-output "redis_endpoint" {
-  description = "ElastiCache Redis endpoint"
-  value       = aws_elasticache_cluster.redis.cache_nodes[0].address
-  sensitive   = true
-}
-
-output "redis_port" {
-  description = "ElastiCache Redis port"
-  value       = aws_elasticache_cluster.redis.cache_nodes[0].port
-}
-
-# Load Balancer Outputs
-output "load_balancer_dns_name" {
-  description = "DNS name of the load balancer"
-  value       = data.kubernetes_service.app_service.status[0].load_balancer[0].ingress[0].hostname
-}
-
 # Security Outputs
 output "kms_key_id" {
   description = "KMS key ID for encryption"

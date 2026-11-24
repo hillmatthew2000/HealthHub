@@ -7,7 +7,7 @@ data "aws_caller_identity" "current" {}
 
 # VPC Module
 module "vpc" {
-  source = "terraform-aws-modules/vpc/aws"
+  source  = "terraform-aws-modules/vpc/aws"
   version = "~> 5.0"
 
   name = "${var.project_name}-${var.environment}-vpc"
@@ -50,12 +50,17 @@ module "eks" {
   cluster_name    = "${var.project_name}-${var.environment}-eks"
   cluster_version = var.kubernetes_version
 
-  vpc_id                         = module.vpc.vpc_id
-  subnet_ids                     = module.vpc.private_subnets
-  cluster_endpoint_public_access = true
+  vpc_id     = module.vpc.vpc_id
+  subnet_ids = module.vpc.private_subnets
+  # The API server is always reachable from inside the VPC. Public access
+  # is needed for deployments from GitHub-hosted runners; restrict it with
+  # eks_public_access_cidrs, or turn it off and deploy from inside the VPC.
+  cluster_endpoint_private_access      = true
+  cluster_endpoint_public_access       = var.eks_public_access
+  cluster_endpoint_public_access_cidrs = var.eks_public_access_cidrs
 
   # Encryption configuration
-  kms_key_description = "EKS Secret Encryption Key"
+  kms_key_description             = "EKS Secret Encryption Key"
   kms_key_deletion_window_in_days = 7
 
   cluster_encryption_config = {
@@ -86,10 +91,10 @@ module "eks" {
       vpc_security_group_ids = [aws_security_group.eks_nodes.id]
 
       # Node group configuration
-      ami_type       = "AL2_x86_64"
-      disk_size      = 50
-      disk_type      = "gp3"
-      
+      ami_type  = "AL2_x86_64"
+      disk_size = 50
+      disk_type = "gp3"
+
       labels = {
         Environment = var.environment
         NodeGroup   = "main"

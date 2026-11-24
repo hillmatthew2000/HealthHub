@@ -109,8 +109,10 @@ resource "aws_backup_selection" "rds_backup" {
 
 # ECR Repository for application images
 resource "aws_ecr_repository" "app" {
-  name                 = "${var.project_name}-${var.environment}"
-  image_tag_mutability = "MUTABLE"
+  name = "${var.project_name}-${var.environment}"
+  # Tags can never be moved to another image, so a tag always names the
+  # image that was built, scanned and deployed under it.
+  image_tag_mutability = "IMMUTABLE"
 
   image_scanning_configuration {
     scan_on_push = true
@@ -118,7 +120,7 @@ resource "aws_ecr_repository" "app" {
 
   encryption_configuration {
     encryption_type = "KMS"
-    kms_key        = aws_kms_key.main.arn
+    kms_key         = aws_kms_key.main.arn
   }
 
   tags = {
@@ -135,12 +137,12 @@ resource "aws_ecr_lifecycle_policy" "app" {
     rules = [
       {
         rulePriority = 1
-        description  = "Keep last 30 images"
+        description  = "Delete untagged images older than 1 day"
         selection = {
-          tagStatus     = "tagged"
-          tagPrefixList = ["v"]
-          countType     = "imageCountMoreThan"
-          countNumber   = 30
+          tagStatus   = "untagged"
+          countType   = "sinceImagePushed"
+          countUnit   = "days"
+          countNumber = 1
         }
         action = {
           type = "expire"
@@ -148,12 +150,11 @@ resource "aws_ecr_lifecycle_policy" "app" {
       },
       {
         rulePriority = 2
-        description  = "Delete untagged images older than 1 day"
+        description  = "Keep the 30 most recent images"
         selection = {
-          tagStatus   = "untagged"
-          countType   = "sinceImagePushed"
-          countUnit   = "days"
-          countNumber = 1
+          tagStatus   = "any"
+          countType   = "imageCountMoreThan"
+          countNumber = 30
         }
         action = {
           type = "expire"

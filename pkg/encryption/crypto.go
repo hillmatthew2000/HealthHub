@@ -1,146 +1,138 @@
+// Package encryption provides authenticated field-level encryption and
+// keyed blind indexes for protected health information (PHI).
+//
+// A single master key (ENCRYPTION_KEY) is expanded with HKDF-SHA256 into
+// independent subkeys: one for AES-256-GCM encryption and one for the
+// HMAC-SHA256 blind index used to search encrypted values by exact match.
 package encryption
 
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hkdf"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
-	"io"
+	"fmt"
 )
 
-// Encryptor handles AES encryption and decryption
-type Encryptor struct {
-	key []byte
+// KeySize is the size in bytes of AES-256 keys.
+const KeySize = 32
+
+// formatV1 identifies ciphertexts produced by Cipher: 1 version byte,
+// a 12 byte random nonce, then the GCM ciphertext and tag.
+const formatV1 byte = 1
+
+// ErrDecrypt is returned when a ciphertext is malformed, was produced with a
+// different key, or has been tampered with.
+var ErrDecrypt = errors.New("encryption: unable to decrypt value")
+
+// ParseKey decodes a master key. It accepts the standard base64 encoding of
+// 32 random bytes (for example the output of `openssl rand -base64 32`), or
+// any raw string of at least 32 bytes, which is then used as HKDF input.
+func ParseKey(s string) ([]byte, error) {
+	if b, err := base64.StdEncoding.DecodeString(s); err == nil && len(b) == KeySize {
+		return b, nil
+	}
+	if len(s) >= KeySize {
+		return []byte(s), nil
+	}
+	return nil, errors.New("key must be base64 encoded 32 bytes or a string of at least 32 bytes")
 }
 
-// NewEncryptor creates a new encryptor with the given key
-func NewEncryptor(key string) (*Encryptor, error) {
-	if len(key) != 32 {
-		return nil, errors.New("encryption key must be exactly 32 characters long")
-	}
-
-	return &Encryptor{key: []byte(key)}, nil
+// Keys holds the subkeys derived from a master key.
+type Keys struct {
+	cipher   *Cipher
+	indexKey []byte
 }
 
-// NewEncryptorFromHash creates a new encryptor using SHA256 hash of the key
-func NewEncryptorFromHash(key string) *Encryptor {
-	hash := sha256.Sum256([]byte(key))
-	return &Encryptor{key: hash[:]}
-}
-
-// Encrypt encrypts plaintext using AES-GCM
-func (e *Encryptor) Encrypt(plaintext string) (string, error) {
-	if plaintext == "" {
-		return "", nil
+// NewKeys derives encryption and blind index subkeys from master.
+func NewKeys(master []byte) (*Keys, error) {
+	if len(master) < KeySize {
+		return nil, fmt.Errorf("encryption: master key must be at least %d bytes", KeySize)
 	}
-
-	block, err := aes.NewCipher(e.key)
+	encKey, err := hkdf.Key(sha256.New, master, nil, "healthhub/phi-encryption/v1", KeySize)
 	if err != nil {
-		return "", err
+		return nil, fmt.Errorf("encryption: derive encryption key: %w", err)
 	}
-
-	gcm, err := cipher.NewGCM(block)
+	indexKey, err := hkdf.Key(sha256.New, master, nil, "healthhub/blind-index/v1", KeySize)
 	if err != nil {
-		return "", err
+		return nil, fmt.Errorf("encryption: derive index key: %w", err)
 	}
-
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err = io.ReadFull(rand.Reader, nonce); err != nil {
-		return "", err
-	}
-
-	ciphertext := gcm.Seal(nonce, nonce, []byte(plaintext), nil)
-	return base64.StdEncoding.EncodeToString(ciphertext), nil
-}
-
-// Decrypt decrypts ciphertext using AES-GCM
-func (e *Encryptor) Decrypt(ciphertext string) (string, error) {
-	if ciphertext == "" {
-		return "", nil
-	}
-
-	data, err := base64.StdEncoding.DecodeString(ciphertext)
-	if err != nil {
-		return "", err
-	}
-
-	block, err := aes.NewCipher(e.key)
-	if err != nil {
-		return "", err
-	}
-
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return "", err
-	}
-
-	nonceSize := gcm.NonceSize()
-	if len(data) < nonceSize {
-		return "", errors.New("ciphertext too short")
-	}
-
-	nonce, ciphertext_bytes := data[:nonceSize], data[nonceSize:]
-	plaintext, err := gcm.Open(nil, nonce, ciphertext_bytes, nil)
-	if err != nil {
-		return "", err
-	}
-
-	return string(plaintext), nil
-}
-
-// EncryptBytes encrypts byte data using AES-GCM
-func (e *Encryptor) EncryptBytes(data []byte) ([]byte, error) {
-	if len(data) == 0 {
-		return nil, nil
-	}
-
-	block, err := aes.NewCipher(e.key)
+	c, err := NewCipher(encKey)
 	if err != nil {
 		return nil, err
 	}
-
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err = io.ReadFull(rand.Reader, nonce); err != nil {
-		return nil, err
-	}
-
-	ciphertext := gcm.Seal(nonce, nonce, data, nil)
-	return ciphertext, nil
+	return &Keys{cipher: c, indexKey: indexKey}, nil
 }
 
-// DecryptBytes decrypts byte data using AES-GCM
-func (e *Encryptor) DecryptBytes(data []byte) ([]byte, error) {
-	if len(data) == 0 {
-		return nil, nil
-	}
+// Cipher returns the AEAD used for field encryption.
+func (k *Keys) Cipher() *Cipher { return k.cipher }
 
-	block, err := aes.NewCipher(e.key)
+// BlindIndex returns a deterministic, keyed digest of value within the given
+// domain (for example "family" or "email"). Equal inputs produce equal
+// digests, so encrypted columns can be searched by exact match without
+// storing the plaintext. Callers are responsible for normalising value.
+func (k *Keys) BlindIndex(domain, value string) string {
+	mac := hmac.New(sha256.New, k.indexKey)
+	mac.Write([]byte(domain))
+	mac.Write([]byte{0})
+	mac.Write([]byte(value))
+	return hex.EncodeToString(mac.Sum(nil)[:16])
+}
+
+// Cipher performs AES-256-GCM authenticated encryption.
+type Cipher struct {
+	aead cipher.AEAD
+}
+
+// NewCipher returns a Cipher for a 32 byte key.
+func NewCipher(key []byte) (*Cipher, error) {
+	if len(key) != KeySize {
+		return nil, fmt.Errorf("encryption: key must be %d bytes, got %d", KeySize, len(key))
+	}
+	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, err
 	}
-
-	gcm, err := cipher.NewGCM(block)
+	aead, err := cipher.NewGCM(block)
 	if err != nil {
 		return nil, err
 	}
+	return &Cipher{aead: aead}, nil
+}
 
-	nonceSize := gcm.NonceSize()
-	if len(data) < nonceSize {
-		return nil, errors.New("ciphertext too short")
+// Seal encrypts plaintext. The additional data aad is authenticated but not
+// stored; pass the record identifier so a ciphertext cannot be moved to a
+// different row without detection.
+func (c *Cipher) Seal(plaintext, aad []byte) ([]byte, error) {
+	nonce := make([]byte, c.aead.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, fmt.Errorf("encryption: generate nonce: %w", err)
 	}
+	out := make([]byte, 0, 1+len(nonce)+len(plaintext)+c.aead.Overhead())
+	out = append(out, formatV1)
+	out = append(out, nonce...)
+	return c.aead.Seal(out, nonce, plaintext, c.additionalData(aad)), nil
+}
 
-	nonce, ciphertext := data[:nonceSize], data[nonceSize:]
-	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
+// Open decrypts a value produced by Seal with the same aad.
+func (c *Cipher) Open(data, aad []byte) ([]byte, error) {
+	nonceSize := c.aead.NonceSize()
+	if len(data) < 1+nonceSize+c.aead.Overhead() || data[0] != formatV1 {
+		return nil, ErrDecrypt
+	}
+	plaintext, err := c.aead.Open(nil, data[1:1+nonceSize], data[1+nonceSize:], c.additionalData(aad))
 	if err != nil {
-		return nil, err
+		return nil, ErrDecrypt
 	}
-
 	return plaintext, nil
+}
+
+// additionalData binds the format version to the caller supplied data.
+func (c *Cipher) additionalData(aad []byte) []byte {
+	return append([]byte{formatV1}, aad...)
 }

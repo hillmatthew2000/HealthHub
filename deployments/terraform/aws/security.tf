@@ -13,7 +13,7 @@ resource "random_password" "encryption_key" {
 resource "aws_secretsmanager_secret" "db_credentials" {
   name                    = "${var.project_name}-${var.environment}-db-credentials"
   description             = "Database credentials for ${var.project_name}"
-  kms_key_id             = aws_kms_key.main.arn
+  kms_key_id              = aws_kms_key.main.arn
   recovery_window_in_days = 7
 
   tags = {
@@ -27,10 +27,10 @@ resource "aws_secretsmanager_secret_version" "db_credentials" {
   secret_string = jsonencode({
     username = aws_db_instance.postgres.username
     password = random_password.db_password.result
-    host     = aws_db_instance.postgres.endpoint
+    host     = aws_db_instance.postgres.address
     port     = aws_db_instance.postgres.port
     database = aws_db_instance.postgres.db_name
-    url      = "postgresql://${aws_db_instance.postgres.username}:${random_password.db_password.result}@${aws_db_instance.postgres.endpoint}:${aws_db_instance.postgres.port}/${aws_db_instance.postgres.db_name}?sslmode=require"
+    url      = "postgres://${aws_db_instance.postgres.username}:${random_password.db_password.result}@${aws_db_instance.postgres.address}:${aws_db_instance.postgres.port}/${aws_db_instance.postgres.db_name}?sslmode=require"
   })
 }
 
@@ -38,7 +38,7 @@ resource "aws_secretsmanager_secret_version" "db_credentials" {
 resource "aws_secretsmanager_secret" "app_secrets" {
   name                    = "${var.project_name}-${var.environment}-app-secrets"
   description             = "Application secrets for ${var.project_name}"
-  kms_key_id             = aws_kms_key.main.arn
+  kms_key_id              = aws_kms_key.main.arn
   recovery_window_in_days = 7
 
   tags = {
@@ -52,7 +52,6 @@ resource "aws_secretsmanager_secret_version" "app_secrets" {
   secret_string = jsonencode({
     jwt_secret     = random_password.jwt_secret.result
     encryption_key = random_password.encryption_key.result
-    redis_url      = "redis://${aws_elasticache_cluster.redis.cache_nodes[0].address}:${aws_elasticache_cluster.redis.cache_nodes[0].port}"
   })
 }
 
@@ -90,18 +89,16 @@ resource "aws_cloudtrail" "main" {
   include_global_service_events = true
   is_multi_region_trail         = true
   enable_logging                = true
+  enable_log_file_validation    = true
 
   kms_key_id = aws_kms_key.main.arn
 
+  # Management events only. Logging S3 data events for the trail's own
+  # bucket would record every log delivery as a new event.
   event_selector {
-    read_write_type                 = "All"
-    include_management_events       = true
+    read_write_type                  = "All"
+    include_management_events        = true
     exclude_management_event_sources = []
-
-    data_resource {
-      type   = "AWS::S3::Object"
-      values = ["${aws_s3_bucket.cloudtrail[0].arn}/*"]
-    }
   }
 
   tags = {
@@ -133,6 +130,17 @@ resource "random_string" "bucket_suffix" {
   upper   = false
 }
 
+resource "aws_s3_bucket_public_access_block" "cloudtrail" {
+  count = var.enable_cloudtrail ? 1 : 0
+
+  bucket = aws_s3_bucket.cloudtrail[0].id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
 resource "aws_s3_bucket_versioning" "cloudtrail" {
   count = var.enable_cloudtrail ? 1 : 0
 
@@ -142,17 +150,15 @@ resource "aws_s3_bucket_versioning" "cloudtrail" {
   }
 }
 
-resource "aws_s3_bucket_encryption" "cloudtrail" {
+resource "aws_s3_bucket_server_side_encryption_configuration" "cloudtrail" {
   count = var.enable_cloudtrail ? 1 : 0
 
   bucket = aws_s3_bucket.cloudtrail[0].id
 
-  server_side_encryption_configuration {
-    rule {
-      apply_server_side_encryption_by_default {
-        kms_master_key_id = aws_kms_key.main.arn
-        sse_algorithm     = "aws:kms"
-      }
+  rule {
+    apply_server_side_encryption_by_default {
+      kms_master_key_id = aws_kms_key.main.arn
+      sse_algorithm     = "aws:kms"
     }
   }
 }
@@ -189,7 +195,7 @@ resource "aws_s3_bucket_policy" "cloudtrail" {
         Resource = "${aws_s3_bucket.cloudtrail[0].arn}/*"
         Condition = {
           StringEquals = {
-            "s3:x-amz-acl" = "bucket-owner-full-control"
+            "s3:x-amz-acl"  = "bucket-owner-full-control"
             "AWS:SourceArn" = "arn:aws:cloudtrail:${var.aws_region}:${data.aws_caller_identity.current.account_id}:trail/${var.project_name}-${var.environment}-cloudtrail"
           }
         }
