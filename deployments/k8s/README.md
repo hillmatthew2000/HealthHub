@@ -13,8 +13,8 @@ This directory contains Kubernetes manifests for deploying the Healthcare API to
 ## Quick Deploy
 
 ```bash
-# Apply all manifests
-kubectl apply -f deployments/k8s/
+# Create the Secret once (see secret.example.yaml), then apply the manifests
+kubectl apply -k deployments/k8s/
 
 # Check deployment status
 kubectl get pods -n healthcare-api
@@ -26,17 +26,16 @@ kubectl get ingress -n healthcare-api
 
 ### Secrets
 
-Update the following base64 encoded values in `secret.yaml`:
+The Secret is not part of `kustomization.yaml`, so applying the manifests
+never replaces real credentials. Create it once per cluster; the command is
+in `secret.example.yaml`:
 
 ```bash
-# Database URL
-echo -n "postgresql://user:password@host:5432/healthhub" | base64
-
-# JWT Secret
-echo -n "your-jwt-secret-key" | base64
-
-# Encryption Key (32 bytes)
-echo -n "your-32-byte-encryption-key-here" | base64
+kubectl create secret generic healthcare-api-secrets -n healthcare-api \
+  --from-literal=DATABASE_URL='postgres://USER:PASSWORD@HOST:5432/healthhub?sslmode=require' \
+  --from-literal=JWT_SECRET="$(openssl rand -base64 48)" \
+  --from-literal=ENCRYPTION_KEY="$(openssl rand -base64 32)" \
+  --from-literal=REDIS_URL='redis://HOST:6379'
 ```
 
 ### ConfigMap

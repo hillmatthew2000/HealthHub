@@ -2,6 +2,7 @@ package auth
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
+
 	"github.com/hillmatthew2000/HealthHub/internal/problem"
 )
 
@@ -52,7 +54,7 @@ func TestVerifyRejectsExpiredToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	m.now = time.Now
-	if _, err := m.Verify(tok); err != ErrInvalidToken {
+	if _, err := m.Verify(tok); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("err = %v, want ErrInvalidToken", err)
 	}
 }
@@ -101,7 +103,7 @@ func TestVerifyRejectsForgedTokens(t *testing.T) {
 	}
 	for name, tok := range tests {
 		t.Run(name, func(t *testing.T) {
-			if _, err := m.Verify(tok); err != ErrInvalidToken {
+			if _, err := m.Verify(tok); !errors.Is(err, ErrInvalidToken) {
 				t.Fatalf("err = %v, want ErrInvalidToken", err)
 			}
 		})
@@ -190,10 +192,10 @@ func TestPasswordHasher(t *testing.T) {
 	if h.Verify("", "anything at all") {
 		t.Error("empty hash (unknown account) accepted")
 	}
-	if _, err := h.Hash("short"); err != ErrPasswordPolicy {
+	if _, err := h.Hash("short"); !errors.Is(err, ErrPasswordPolicy) {
 		t.Errorf("short password: err = %v", err)
 	}
-	if _, err := h.Hash(strings.Repeat("a", MaxPasswordBytes+1)); err != ErrPasswordPolicy {
+	if _, err := h.Hash(strings.Repeat("a", MaxPasswordBytes+1)); !errors.Is(err, ErrPasswordPolicy) {
 		t.Errorf("long password: err = %v", err)
 	}
 	if _, err := NewPasswordHasher(99); err == nil {

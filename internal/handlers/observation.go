@@ -1,15 +1,17 @@
 package handlers
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
+	"gorm.io/gorm"
+
 	"github.com/hillmatthew2000/HealthHub/internal/auth"
 	"github.com/hillmatthew2000/HealthHub/internal/models"
-	"gorm.io/gorm"
 )
 
 // ObservationHandler handles HTTP requests for observation resources
@@ -66,7 +68,7 @@ func (h *ObservationHandler) CreateObservation(c *gin.Context) {
 		patientID := strings.TrimPrefix(observation.Subject.Reference, "Patient/")
 		var patient models.Patient
 		if err := h.db.Where("id = ?", patientID).First(&patient).Error; err != nil {
-			if err == gorm.ErrRecordNotFound {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
 				c.JSON(http.StatusBadRequest, ErrorResponse{
 					Error: "Referenced patient not found",
 					Code:  "PATIENT_NOT_FOUND",
@@ -229,7 +231,7 @@ func (h *ObservationHandler) GetObservation(c *gin.Context) {
 
 	var observation models.Observation
 	if err := h.db.Where("id = ?", id).First(&observation).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			c.JSON(http.StatusNotFound, ErrorResponse{
 				Error: "Observation not found",
 				Code:  "OBSERVATION_NOT_FOUND",
@@ -275,7 +277,7 @@ func (h *ObservationHandler) UpdateObservation(c *gin.Context) {
 
 	var observation models.Observation
 	if err := h.db.Where("id = ?", id).First(&observation).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			c.JSON(http.StatusNotFound, ErrorResponse{
 				Error: "Observation not found",
 				Code:  "OBSERVATION_NOT_FOUND",
@@ -314,7 +316,7 @@ func (h *ObservationHandler) UpdateObservation(c *gin.Context) {
 		patientID := strings.TrimPrefix(updateData.Subject.Reference, "Patient/")
 		var patient models.Patient
 		if err := h.db.Where("id = ?", patientID).First(&patient).Error; err != nil {
-			if err == gorm.ErrRecordNotFound {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
 				c.JSON(http.StatusBadRequest, ErrorResponse{
 					Error: "Referenced patient not found",
 					Code:  "PATIENT_NOT_FOUND",
@@ -385,7 +387,7 @@ func (h *ObservationHandler) DeleteObservation(c *gin.Context) {
 	// Check if observation exists
 	var observation models.Observation
 	if err := h.db.Where("id = ?", id).First(&observation).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			c.JSON(http.StatusNotFound, ErrorResponse{
 				Error: "Observation not found",
 				Code:  "OBSERVATION_NOT_FOUND",
@@ -445,7 +447,7 @@ func (h *ObservationHandler) GetPatientObservations(c *gin.Context) {
 	// Verify patient exists
 	var patient models.Patient
 	if err := h.db.Where("id = ?", patientID).First(&patient).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			c.JSON(http.StatusNotFound, ErrorResponse{
 				Error: "Patient not found",
 				Code:  "PATIENT_NOT_FOUND",

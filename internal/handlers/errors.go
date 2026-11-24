@@ -7,9 +7,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
+	"go.uber.org/zap"
+
 	"github.com/hillmatthew2000/HealthHub/internal/problem"
 	"github.com/hillmatthew2000/HealthHub/pkg/logger"
-	"go.uber.org/zap"
 )
 
 // internalError logs err with the request ID and returns a generic problem.

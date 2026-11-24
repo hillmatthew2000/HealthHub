@@ -22,7 +22,7 @@ const (
 	CodeValidationFailed     = "validation_failed"
 	CodeUnauthorized         = "unauthorized"
 	CodeInvalidToken         = "invalid_token"
-	CodeInvalidCredentials   = "invalid_credentials"
+	CodeInvalidCredentials   = "invalid_credentials" // #nosec G101 -- an error code, not a credential
 	CodeForbidden            = "forbidden"
 	CodeNotFound             = "not_found"
 	CodeMethodNotAllowed     = "method_not_allowed"

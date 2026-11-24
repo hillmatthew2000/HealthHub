@@ -1,15 +1,17 @@
 package handlers
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
+	"gorm.io/gorm"
+
 	"github.com/hillmatthew2000/HealthHub/internal/auth"
 	"github.com/hillmatthew2000/HealthHub/internal/models"
-	"gorm.io/gorm"
 )
 
 // PatientHandler handles HTTP requests for patient resources
@@ -191,7 +193,7 @@ func (h *PatientHandler) GetPatient(c *gin.Context) {
 
 	var patient models.Patient
 	if err := h.db.Where("id = ?", id).First(&patient).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			c.JSON(http.StatusNotFound, ErrorResponse{
 				Error: "Patient not found",
 				Code:  "PATIENT_NOT_FOUND",
@@ -237,7 +239,7 @@ func (h *PatientHandler) UpdatePatient(c *gin.Context) {
 
 	var patient models.Patient
 	if err := h.db.Where("id = ?", id).First(&patient).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			c.JSON(http.StatusNotFound, ErrorResponse{
 				Error: "Patient not found",
 				Code:  "PATIENT_NOT_FOUND",
@@ -326,7 +328,7 @@ func (h *PatientHandler) DeletePatient(c *gin.Context) {
 	// Check if patient exists
 	var patient models.Patient
 	if err := h.db.Where("id = ?", id).First(&patient).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			c.JSON(http.StatusNotFound, ErrorResponse{
 				Error: "Patient not found",
 				Code:  "PATIENT_NOT_FOUND",

@@ -1,5 +1,7 @@
 # Multi-stage build for smaller production image
-FROM golang:1.21-alpine AS builder
+FROM golang:1.25-alpine AS builder
+
+ARG VERSION=dev
 
 # Set necessary environment variables
 ENV GO111MODULE=on \
@@ -25,7 +27,7 @@ RUN go mod download
 COPY . .
 
 # Build the application
-RUN go build -ldflags="-w -s" -o main cmd/server/main.go
+RUN go build -trimpath -ldflags="-w -s -X main.version=${VERSION}" -o main ./cmd/server
 
 # Production stage
 FROM scratch

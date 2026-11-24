@@ -89,7 +89,7 @@ func Panic(msg string, fields ...zap.Field) {
 // Sync flushes any buffered log entries
 func Sync() {
 	if Logger != nil {
-		Logger.Sync()
+		_ = Logger.Sync()
 	}
 }
 

@@ -5,6 +5,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -104,8 +105,8 @@ func LoadFrom(lookup func(string) (string, bool)) (*Config, error) {
 		TLSKeyFile:  r.str("TLS_KEY_FILE", ""),
 
 		DatabaseURL:       r.str("DATABASE_URL", ""),
-		DBMaxConns:        int32(r.integer("DB_MAX_CONNS", 20)),
-		DBMinConns:        int32(r.integer("DB_MIN_CONNS", 2)),
+		DBMaxConns:        r.int32("DB_MAX_CONNS", 20),
+		DBMinConns:        r.int32("DB_MIN_CONNS", 2),
 		DBConnMaxLifetime: r.duration("DB_CONN_MAX_LIFETIME", time.Hour),
 		DBConnMaxIdleTime: r.duration("DB_CONN_MAX_IDLE_TIME", 15*time.Minute),
 
@@ -266,6 +267,15 @@ func (r *reader) integer(key string, def int) int {
 		return def
 	}
 	return n
+}
+
+func (r *reader) int32(key string, def int32) int32 {
+	n := r.integer(key, int(def))
+	if n < math.MinInt32 || n > math.MaxInt32 {
+		r.errs = append(r.errs, fmt.Errorf("%s is out of range (got %d)", key, n))
+		return def
+	}
+	return int32(n)
 }
 
 func (r *reader) boolean(key string, def bool) bool {

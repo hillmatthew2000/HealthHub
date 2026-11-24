@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
+
 	"github.com/hillmatthew2000/HealthHub/internal/auth"
 	"github.com/hillmatthew2000/HealthHub/internal/config"
 	"github.com/hillmatthew2000/HealthHub/internal/handlers"
@@ -19,7 +21,6 @@ import (
 	"github.com/hillmatthew2000/HealthHub/internal/problem"
 	"github.com/hillmatthew2000/HealthHub/pkg/database"
 	"github.com/hillmatthew2000/HealthHub/pkg/logger"
-	"go.uber.org/zap"
 )
 
 // version is set at build time with -ldflags "-X main.version=...".

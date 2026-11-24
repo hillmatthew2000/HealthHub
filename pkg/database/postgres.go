@@ -4,10 +4,11 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/hillmatthew2000/HealthHub/internal/models"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
+
+	"github.com/hillmatthew2000/HealthHub/internal/models"
 )
 
 // Config holds database configuration

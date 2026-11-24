@@ -8,12 +8,13 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
+	"go.uber.org/zap"
+	"gorm.io/gorm"
+
 	"github.com/hillmatthew2000/HealthHub/internal/auth"
 	"github.com/hillmatthew2000/HealthHub/internal/models"
 	"github.com/hillmatthew2000/HealthHub/internal/problem"
 	"github.com/hillmatthew2000/HealthHub/pkg/logger"
-	"go.uber.org/zap"
-	"gorm.io/gorm"
 )
 
 // AuthHandler handles authentication requests.

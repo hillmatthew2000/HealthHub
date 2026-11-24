@@ -1,0 +1,17 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# The Secret is deliberately not listed: create it out of band (see
+# secret.example.yaml) so applying these manifests never overwrites real
+# credentials with placeholders.
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - deployment.yaml
+  - service.yaml
+  - ingress.yaml
+
+images:
+  - name: healthcare-api
+    newName: your-registry/healthcare-api
+    newTag: latest

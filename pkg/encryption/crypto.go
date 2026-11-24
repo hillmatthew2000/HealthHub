@@ -109,13 +109,14 @@ func NewCipher(key []byte) (*Cipher, error) {
 // stored; pass the record identifier so a ciphertext cannot be moved to a
 // different row without detection.
 func (c *Cipher) Seal(plaintext, aad []byte) ([]byte, error) {
-	nonceSize := c.aead.NonceSize()
-	out := make([]byte, 1+nonceSize, 1+nonceSize+len(plaintext)+c.aead.Overhead())
-	out[0] = formatV1
-	if _, err := rand.Read(out[1 : 1+nonceSize]); err != nil {
+	nonce := make([]byte, c.aead.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
 		return nil, fmt.Errorf("encryption: generate nonce: %w", err)
 	}
-	return c.aead.Seal(out, out[1:1+nonceSize], plaintext, c.additionalData(aad)), nil
+	out := make([]byte, 0, 1+len(nonce)+len(plaintext)+c.aead.Overhead())
+	out = append(out, formatV1)
+	out = append(out, nonce...)
+	return c.aead.Seal(out, nonce, plaintext, c.additionalData(aad)), nil
 }
 
 // Open decrypts a value produced by Seal with the same aad.

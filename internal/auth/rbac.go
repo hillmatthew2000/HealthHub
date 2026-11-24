@@ -5,8 +5,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/hillmatthew2000/HealthHub/internal/models"
 	"gorm.io/gorm"
+
+	"github.com/hillmatthew2000/HealthHub/internal/models"
 )
 
 // RBACService handles role-based access control operations

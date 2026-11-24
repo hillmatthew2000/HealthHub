@@ -36,7 +36,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: healthcare-api
-        image: your-registry/healthcare-api:latest
+        image: healthcare-api # set by kustomization.yaml and the deploy workflow
         imagePullPolicy: Always
         ports:
         - name: http
