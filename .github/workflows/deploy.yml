@@ -24,6 +24,22 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    # Runs the repository integration tests; without the database URL they
+    # are skipped and the unit tests still pass.
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: healthhub
+          POSTGRES_PASSWORD: healthhub
+          POSTGRES_DB: healthhub_test
+        options: >-
+          --health-cmd "pg_isready -U healthhub"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+        ports:
+          - 5432:5432
     steps:
       - uses: actions/checkout@v7
 
@@ -44,6 +60,8 @@ jobs:
         run: go vet ./...
 
       - name: Test
+        env:
+          HEALTHHUB_TEST_DATABASE_URL: postgres://healthhub:healthhub@localhost:5432/healthhub_test?sslmode=disable
         run: go test -race -coverprofile=coverage.out ./...
 
       - name: Upload coverage

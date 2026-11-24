@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strings"
@@ -8,31 +9,48 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
+	"github.com/google/uuid"
 	"go.uber.org/zap"
-	"gorm.io/gorm"
 
 	"github.com/hillmatthew2000/HealthHub/internal/auth"
 	"github.com/hillmatthew2000/HealthHub/internal/models"
 	"github.com/hillmatthew2000/HealthHub/internal/problem"
+	"github.com/hillmatthew2000/HealthHub/internal/store"
 	"github.com/hillmatthew2000/HealthHub/pkg/logger"
 )
 
+// UserStore is the persistence the account handlers need.
+type UserStore interface {
+	Create(ctx context.Context, u *models.User) error
+	Get(ctx context.Context, id uuid.UUID) (*models.User, error)
+	GetByEmail(ctx context.Context, email string) (*models.User, error)
+	List(ctx context.Context, page store.Page) ([]models.User, int, error)
+	Update(ctx context.Context, id uuid.UUID, upd store.UserUpdate) (*models.User, error)
+	SetPassword(ctx context.Context, id uuid.UUID, hash string) error
+	RecordLogin(ctx context.Context, id uuid.UUID) error
+}
+
+// TokenIssuer issues access tokens. *auth.TokenManager implements it.
+type TokenIssuer interface {
+	Issue(p auth.Principal) (string, time.Time, error)
+}
+
 // AuthHandler handles authentication requests.
 type AuthHandler struct {
-	db                *gorm.DB
-	validator         *validator.Validate
-	tokens            *auth.TokenManager
+	users             UserStore
+	tokens            TokenIssuer
 	passwords         *auth.PasswordHasher
+	validator         *validator.Validate
 	allowRegistration bool
 }
 
 // NewAuthHandler creates a new authentication handler.
-func NewAuthHandler(db *gorm.DB, tokens *auth.TokenManager, passwords *auth.PasswordHasher, allowRegistration bool) *AuthHandler {
+func NewAuthHandler(users UserStore, tokens TokenIssuer, passwords *auth.PasswordHasher, allowRegistration bool) *AuthHandler {
 	return &AuthHandler{
-		db:                db,
-		validator:         validator.New(),
+		users:             users,
 		tokens:            tokens,
 		passwords:         passwords,
+		validator:         newValidator(),
 		allowRegistration: allowRegistration,
 	}
 }
@@ -40,34 +58,33 @@ func NewAuthHandler(db *gorm.DB, tokens *auth.TokenManager, passwords *auth.Pass
 // Login authenticates a user and returns an access token.
 func (h *AuthHandler) Login(c *gin.Context) {
 	var req models.AuthRequest
-	if !h.bind(c, &req) {
+	if !bindJSON(c, h.validator, &req) {
 		return
 	}
-	email := normalizeEmail(req.Email)
-
-	var user models.User
-	err := h.db.WithContext(c.Request.Context()).Preload("Roles").
-		Where("email = ? AND active = ?", email, true).First(&user).Error
-	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+	ctx := c.Request.Context()
+	user, err := h.users.GetByEmail(ctx, NormalizeEmail(req.Email))
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		user = &models.User{}
+	case err != nil:
 		internalError(c, "load user for login", err)
 		return
 	}
 
 	// Verify runs a bcrypt comparison even for unknown accounts so the
 	// response time does not reveal which email addresses are registered.
-	if !h.passwords.Verify(user.Password, req.Password) {
+	if !h.passwords.Verify(user.PasswordHash, req.Password) || !user.Active {
 		logger.LogSecurityEvent("login_failed", user.ID, nil)
 		problem.Write(c, problem.New(http.StatusUnauthorized, problem.CodeInvalidCredentials,
 			"The email address or password is incorrect."))
 		return
 	}
 
-	now := time.Now().UTC()
-	if err := h.db.WithContext(c.Request.Context()).Model(&user).Update("last_login", now).Error; err != nil {
+	if err := h.users.RecordLogin(ctx, uuid.MustParse(user.ID)); err != nil {
 		logger.Warn("failed to record last login", zap.String("user_id", user.ID), zap.Error(err))
 	}
 	logger.LogSecurityEvent("login_succeeded", user.ID, nil)
-	h.respondWithToken(c, http.StatusOK, &user)
+	h.respondWithToken(c, http.StatusOK, user)
 }
 
 // Register creates a new user account. Self-registration is disabled unless
@@ -81,7 +98,7 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	}
 
 	var req models.RegisterRequest
-	if !h.bind(c, &req) {
+	if !bindJSON(c, h.validator, &req) {
 		return
 	}
 	hash, err := h.passwords.Hash(req.Password)
@@ -89,100 +106,78 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		problem.Write(c, problem.Validation(problem.FieldError{Field: "password", Message: err.Error()}))
 		return
 	}
-
-	user := models.User{
-		Email:     normalizeEmail(req.Email),
-		Password:  hash,
-		FirstName: strings.TrimSpace(req.FirstName),
-		LastName:  strings.TrimSpace(req.LastName),
-		Active:    true,
+	user := &models.User{
+		Email:        NormalizeEmail(req.Email),
+		PasswordHash: hash,
+		FirstName:    strings.TrimSpace(req.FirstName),
+		LastName:     strings.TrimSpace(req.LastName),
+		Active:       true,
 	}
-
-	db := h.db.WithContext(c.Request.Context())
-	var count int64
-	if err := db.Model(&models.User{}).Where("email = ?", user.Email).Count(&count).Error; err != nil {
-		internalError(c, "check existing user", err)
-		return
-	}
-	if count > 0 {
-		problem.Write(c, problem.Conflict("An account with this email address already exists."))
-		return
-	}
-	if err := db.Create(&user).Error; err != nil {
+	if err := h.users.Create(c.Request.Context(), user); err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			problem.Write(c, problem.Conflict("An account with this email address already exists."))
+			return
+		}
 		internalError(c, "create user", err)
 		return
 	}
 
-	logger.LogAuditEvent("create", "user", user.ID, map[string]any{"source": "self_registration"})
-	h.respondWithToken(c, http.StatusCreated, &user)
+	logger.LogSecurityEvent("user_registered", user.ID, nil)
+	h.respondWithToken(c, http.StatusCreated, user)
+}
+
+// currentUser loads the authenticated caller's account. It writes a
+// problem and returns nil if the account is gone or deactivated.
+func (h *AuthHandler) currentUser(c *gin.Context) *models.User {
+	p, ok := auth.PrincipalFrom(c)
+	if !ok {
+		unauthenticated(c)
+		return nil
+	}
+	id, err := uuid.Parse(p.UserID)
+	if err != nil {
+		unauthenticated(c)
+		return nil
+	}
+	user, err := h.users.Get(c.Request.Context(), id)
+	if errors.Is(err, store.ErrNotFound) || (err == nil && !user.Active) {
+		problem.Write(c, problem.New(http.StatusUnauthorized, problem.CodeInvalidToken,
+			"The account no longer exists or has been deactivated."))
+		return nil
+	}
+	if err != nil {
+		internalError(c, "load current user", err)
+		return nil
+	}
+	return user
 }
 
 // RefreshToken issues a new token for a caller holding a valid one. The
 // account is re-read so deactivated users and role changes take effect.
 func (h *AuthHandler) RefreshToken(c *gin.Context) {
-	p, ok := auth.PrincipalFrom(c)
-	if !ok {
-		unauthenticated(c)
-		return
+	if user := h.currentUser(c); user != nil {
+		h.respondWithToken(c, http.StatusOK, user)
 	}
-	var user models.User
-	err := h.db.WithContext(c.Request.Context()).Preload("Roles").
-		Where("id = ? AND active = ?", p.UserID, true).First(&user).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		problem.Write(c, problem.New(http.StatusUnauthorized, problem.CodeInvalidToken,
-			"The account no longer exists or has been deactivated."))
-		return
-	}
-	if err != nil {
-		internalError(c, "load user for refresh", err)
-		return
-	}
-	h.respondWithToken(c, http.StatusOK, &user)
 }
 
 // GetProfile returns the current user's profile.
 func (h *AuthHandler) GetProfile(c *gin.Context) {
-	p, ok := auth.PrincipalFrom(c)
-	if !ok {
-		unauthenticated(c)
-		return
+	if user := h.currentUser(c); user != nil {
+		c.JSON(http.StatusOK, user.Info())
 	}
-	var user models.User
-	err := h.db.WithContext(c.Request.Context()).Preload("Roles").Where("id = ?", p.UserID).First(&user).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		problem.Write(c, problem.NotFound("The account no longer exists."))
-		return
-	}
-	if err != nil {
-		internalError(c, "load profile", err)
-		return
-	}
-	c.JSON(http.StatusOK, userInfo(&user))
 }
 
 // ChangePassword changes the current user's password.
 func (h *AuthHandler) ChangePassword(c *gin.Context) {
-	p, ok := auth.PrincipalFrom(c)
-	if !ok {
-		unauthenticated(c)
-		return
-	}
 	var req models.ChangePasswordRequest
-	if !h.bind(c, &req) {
+	if !bindJSON(c, h.validator, &req) {
 		return
 	}
-
-	db := h.db.WithContext(c.Request.Context())
-	var user models.User
-	if err := db.Where("id = ?", p.UserID).First(&user).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			problem.Write(c, problem.NotFound("The account no longer exists."))
-			return
-		}
-		internalError(c, "load user for password change", err)
+	user := h.currentUser(c)
+	if user == nil {
 		return
 	}
-	if !h.passwords.Verify(user.Password, req.CurrentPassword) {
+	if !h.passwords.Verify(user.PasswordHash, req.CurrentPassword) {
 		logger.LogSecurityEvent("password_change_failed", user.ID, nil)
 		problem.Write(c, problem.Validation(problem.FieldError{
 			Field: "currentPassword", Message: "is incorrect",
@@ -194,8 +189,8 @@ func (h *AuthHandler) ChangePassword(c *gin.Context) {
 		problem.Write(c, problem.Validation(problem.FieldError{Field: "newPassword", Message: err.Error()}))
 		return
 	}
-	if err := db.Model(&user).Update("password", hash).Error; err != nil {
-		internalError(c, "update password", err)
+	if err := h.users.SetPassword(c.Request.Context(), uuid.MustParse(user.ID), hash); err != nil {
+		storeError(c, "update password", "User", err)
 		return
 	}
 	logger.LogSecurityEvent("password_changed", user.ID, nil)
@@ -203,43 +198,20 @@ func (h *AuthHandler) ChangePassword(c *gin.Context) {
 }
 
 func (h *AuthHandler) respondWithToken(c *gin.Context, status int, user *models.User) {
-	info := userInfo(user)
-	roles := make([]auth.Role, len(info.Roles))
-	for i, r := range info.Roles {
-		roles[i] = auth.Role(r)
+	roles := make([]auth.Role, 0, len(user.Roles))
+	for _, r := range user.Roles {
+		roles = append(roles, auth.Role(r))
 	}
 	token, expiresAt, err := h.tokens.Issue(auth.Principal{UserID: user.ID, Email: user.Email, Roles: roles})
 	if err != nil {
 		internalError(c, "issue token", err)
 		return
 	}
-	c.JSON(status, models.AuthResponse{Token: token, ExpiresAt: expiresAt, User: info})
+	c.JSON(status, models.AuthResponse{Token: token, ExpiresAt: expiresAt, User: user.Info()})
 }
 
-// bind decodes and validates a JSON body, writing a problem on failure.
-func (h *AuthHandler) bind(c *gin.Context, dst any) bool {
-	if err := c.ShouldBindJSON(dst); err != nil {
-		problem.Write(c, problem.BadRequest("The request body must be valid JSON."))
-		return false
-	}
-	if err := h.validator.Struct(dst); err != nil {
-		problem.Write(c, problem.Validation(fieldErrors(err)...))
-		return false
-	}
-	return true
-}
-
-func userInfo(u *models.User) models.UserInfo {
-	return models.UserInfo{
-		ID:        u.ID,
-		Email:     u.Email,
-		FirstName: u.FirstName,
-		LastName:  u.LastName,
-		Roles:     u.GetRoleNames(),
-		Active:    u.Active,
-	}
-}
-
-func normalizeEmail(s string) string {
+// NormalizeEmail lower-cases and trims an email address. Accounts are
+// stored and looked up in this form.
+func NormalizeEmail(s string) string {
 	return strings.ToLower(strings.TrimSpace(s))
 }

@@ -3,6 +3,7 @@ package handlers
 import (
 	"errors"
 	"net/http"
+	"reflect"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -10,6 +11,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/hillmatthew2000/HealthHub/internal/problem"
+	"github.com/hillmatthew2000/HealthHub/internal/store"
 	"github.com/hillmatthew2000/HealthHub/pkg/logger"
 )
 
@@ -22,6 +24,19 @@ func internalError(c *gin.Context, op string, err error) {
 		zap.Error(err),
 	)
 	problem.Write(c, problem.Internal())
+}
+
+// storeError maps repository errors to problems. resource names the entity
+// for the not found message, for example "Patient".
+func storeError(c *gin.Context, op, resource string, err error) {
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		problem.Write(c, problem.NotFound(resource+" not found."))
+	case errors.Is(err, store.ErrConflict):
+		problem.Write(c, problem.Conflict(resource+" conflicts with an existing record."))
+	default:
+		internalError(c, op, err)
+	}
 }
 
 func unauthenticated(c *gin.Context) {
@@ -42,7 +57,7 @@ func fieldErrors(err error) []problem.FieldError {
 	return out
 }
 
-// fieldPath turns "RegisterRequest.FirstName" into "firstName".
+// fieldPath turns "Patient.Name[0].Family" into "name[0].family".
 func fieldPath(fe validator.FieldError) string {
 	ns := fe.Namespace()
 	if i := strings.Index(ns, "."); i >= 0 {
@@ -58,18 +73,45 @@ func fieldPath(fe validator.FieldError) string {
 }
 
 func ruleMessage(fe validator.FieldError) string {
+	unit := " characters"
+	switch fe.Kind() {
+	case reflect.Slice, reflect.Array, reflect.Map:
+		unit = " items"
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+		reflect.Float32, reflect.Float64:
+		unit = ""
+	}
 	switch fe.Tag() {
 	case "required":
 		return "is required"
 	case "email":
 		return "must be a valid email address"
 	case "min":
-		return "must be at least " + fe.Param() + " characters"
+		if unit == "" {
+			return "must be at least " + fe.Param()
+		}
+		return "must have at least " + fe.Param() + unit
 	case "max":
-		return "must be at most " + fe.Param() + " characters"
+		if unit == "" {
+			return "must be at most " + fe.Param()
+		}
+		return "must have at most " + fe.Param() + unit
 	case "oneof":
 		return "must be one of: " + fe.Param()
 	default:
 		return "failed the " + fe.Tag() + " rule"
 	}
+}
+
+// jsonFieldName makes validation errors name fields as they appear in JSON.
+func jsonFieldName(f reflect.StructField) string {
+	name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+	switch name {
+	case "-":
+		return ""
+	case "":
+		return f.Name
+	}
+	return name
 }

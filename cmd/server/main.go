@@ -1,10 +1,16 @@
 // Command server runs the HealthHub API.
+//
+// Usage:
+//
+//	server [serve]   run the API (the default)
+//	server migrate   apply pending database migrations and exit
 package main
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/signal"
@@ -12,14 +18,15 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 
 	"github.com/hillmatthew2000/HealthHub/internal/auth"
 	"github.com/hillmatthew2000/HealthHub/internal/config"
 	"github.com/hillmatthew2000/HealthHub/internal/handlers"
-	"github.com/hillmatthew2000/HealthHub/internal/middleware"
-	"github.com/hillmatthew2000/HealthHub/internal/problem"
-	"github.com/hillmatthew2000/HealthHub/pkg/database"
+	"github.com/hillmatthew2000/HealthHub/internal/server"
+	"github.com/hillmatthew2000/HealthHub/internal/store"
+	"github.com/hillmatthew2000/HealthHub/pkg/encryption"
 	"github.com/hillmatthew2000/HealthHub/pkg/logger"
 )
 
@@ -27,22 +34,101 @@ import (
 var version = "dev"
 
 func main() {
-	if err := run(); err != nil {
+	if err := run(os.Args[1:], os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, "healthhub:", err)
 		os.Exit(1)
 	}
 }
 
-func run() error {
+func run(args []string, stdout io.Writer) error {
+	cmd := "serve"
+	if len(args) > 0 {
+		cmd = args[0]
+	}
+	switch cmd {
+	case "serve":
+		return serve()
+	case "migrate":
+		return migrate(stdout)
+	case "version":
+		_, err := fmt.Fprintln(stdout, version)
+		return err
+	case "help", "-h", "-help", "--help":
+		_, err := fmt.Fprint(stdout, usage)
+		return err
+	default:
+		return fmt.Errorf("unknown command %q\n\n%s", cmd, usage)
+	}
+}
+
+const usage = `Usage: server <command>
+
+Commands:
+  serve     run the API (default)
+  migrate   apply pending database migrations and exit
+  version   print the version
+`
+
+// setup loads the configuration and initialises logging.
+func setup() (*config.Config, error) {
 	cfg, err := config.Load()
 	if err != nil {
-		return err
+		return nil, err
 	}
-
 	if cfg.IsDevelopment() {
 		logger.InitDevelopment()
 	} else {
 		logger.Init(cfg.LogLevel)
+	}
+	return cfg, nil
+}
+
+func openDB(ctx context.Context, cfg *config.Config) (*pgxpool.Pool, error) {
+	return store.Open(ctx, store.PoolConfig{
+		URL:             cfg.DatabaseURL,
+		MaxConns:        cfg.DBMaxConns,
+		MinConns:        cfg.DBMinConns,
+		MaxConnLifetime: cfg.DBConnMaxLifetime,
+		MaxConnIdleTime: cfg.DBConnMaxIdleTime,
+	})
+}
+
+func applyMigrations(ctx context.Context, db *pgxpool.Pool) error {
+	applied, err := store.Migrate(ctx, db)
+	if err != nil {
+		return err
+	}
+	for _, v := range applied {
+		logger.Info("applied database migration", zap.Int64("version", v))
+	}
+	return nil
+}
+
+func migrate(stdout io.Writer) error {
+	cfg, err := setup()
+	if err != nil {
+		return err
+	}
+	defer logger.Sync()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	db, err := openDB(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	applied, err := store.Migrate(ctx, db)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(stdout, "applied %d migration(s)\n", len(applied))
+	return err
+}
+
+func serve() error {
+	cfg, err := setup()
+	if err != nil {
+		return err
 	}
 	defer logger.Sync()
 
@@ -65,109 +151,64 @@ func run() error {
 	if err != nil {
 		return err
 	}
-
-	db, err := database.NewPostgresDB(cfg.DatabaseURL)
+	master, err := encryption.ParseKey(cfg.EncryptionKey)
 	if err != nil {
 		return err
 	}
-	defer func() {
-		if err := database.CloseDB(db); err != nil {
-			logger.Error("failed to close database connection", zap.Error(err))
-		}
-	}()
-	if err := database.AutoMigrate(db); err != nil {
+	keys, err := encryption.NewKeys(master)
+	if err != nil {
 		return err
 	}
-	if err := database.CreateIndexes(db); err != nil {
-		logger.Warn("failed to create some database indexes", zap.Error(err))
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	startCtx, cancelStart := context.WithTimeout(ctx, time.Minute)
+	defer cancelStart()
+	db, err := openDB(startCtx, cfg)
+	if err != nil {
+		return err
 	}
-	if err := auth.NewRBACService(db).InitializeDefaultRoles(); err != nil {
-		logger.Warn("failed to initialize default roles", zap.Error(err))
+	defer db.Close()
+	if cfg.AutoMigrate {
+		if err := applyMigrations(startCtx, db); err != nil {
+			return err
+		}
 	}
 
 	if cfg.IsProduction() {
 		gin.SetMode(gin.ReleaseMode)
 	}
-	r := gin.New()
-	// Only trust X-Forwarded-For from configured proxies; otherwise any
-	// client could spoof its IP address.
-	if err := r.SetTrustedProxies(cfg.TrustedProxies); err != nil {
-		return fmt.Errorf("invalid TRUSTED_PROXIES: %w", err)
+	patients := store.NewPatients(db, keys)
+	router, err := server.New(server.Options{
+		Version:           version,
+		HSTS:              cfg.TLSEnabled || cfg.IsProduction(),
+		TrustedProxies:    cfg.TrustedProxies,
+		AllowedOrigins:    cfg.AllowedOrigins,
+		MaxBodyBytes:      cfg.MaxBodyBytes,
+		RequestTimeout:    cfg.RequestTimeout,
+		Paging:            handlers.Paging{DefaultLimit: cfg.DefaultPageSize, MaxLimit: cfg.MaxPageSize},
+		AllowRegistration: cfg.AllowRegistration,
+	}, server.Deps{
+		DB:           db,
+		Users:        store.NewUsers(db),
+		Patients:     patients,
+		Observations: store.NewObservations(db, keys),
+		Tokens:       tokens,
+		Passwords:    passwords,
+	})
+	if err != nil {
+		return err
 	}
-	r.Use(func(c *gin.Context) {
-		start := time.Now()
-		c.Next()
-		// Log the route template rather than the raw URL: paths and query
-		// strings can contain identifiers and search terms that are PHI.
-		route := c.FullPath()
-		if route == "" {
-			route = "unmatched"
-		}
-		logger.LogHTTPRequest(c.Request.Method, route, c.Writer.Status(),
-			time.Since(start).Milliseconds(), c.GetString(auth.UserIDKey))
-	})
-	r.Use(gin.CustomRecovery(func(c *gin.Context, _ any) {
-		problem.Write(c, problem.Internal())
-	}))
-	r.Use(middleware.SecurityHeaders(cfg.TLSEnabled || cfg.IsProduction()))
-	r.Use(middleware.CORS(cfg.AllowedOrigins))
-	r.Use(func(c *gin.Context) {
-		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, cfg.MaxBodyBytes)
-		c.Next()
-	})
-	r.NoRoute(func(c *gin.Context) {
-		problem.Write(c, problem.NotFound("No route matches "+c.Request.Method+" "+c.Request.URL.Path+"."))
-	})
-
-	// Health probes: liveness never touches dependencies, readiness checks
-	// the database. /health is kept as an alias of readiness.
-	r.GET("/health/live", handlers.LivenessCheck())
-	r.GET("/health/ready", handlers.ReadinessCheck(db))
-	r.GET("/health", handlers.ReadinessCheck(db))
-
-	patientHandler := handlers.NewPatientHandler(db)
-	observationHandler := handlers.NewObservationHandler(db)
-	authHandler := handlers.NewAuthHandler(db, tokens, passwords, cfg.AllowRegistration)
-
-	api := r.Group("/api/v1")
-	api.POST("/auth/login", authHandler.Login)
-	api.POST("/auth/register", authHandler.Register)
-
-	protected := api.Group("")
-	protected.Use(auth.Authenticate(tokens))
-
-	authRoutes := protected.Group("/auth")
-	authRoutes.POST("/refresh", authHandler.RefreshToken)
-	authRoutes.GET("/profile", authHandler.GetProfile)
-	authRoutes.POST("/change-password", authHandler.ChangePassword)
-
-	can := auth.Require
-	patients := protected.Group("/patients")
-	patients.POST("", can(auth.ResourcePatients, auth.ActionCreate), patientHandler.CreatePatient)
-	patients.GET("", can(auth.ResourcePatients, auth.ActionRead), patientHandler.GetPatients)
-	patients.GET("/:id", can(auth.ResourcePatients, auth.ActionRead), patientHandler.GetPatient)
-	patients.PUT("/:id", can(auth.ResourcePatients, auth.ActionUpdate), patientHandler.UpdatePatient)
-	patients.DELETE("/:id", can(auth.ResourcePatients, auth.ActionDelete), patientHandler.DeletePatient)
-	patients.GET("/:id/observations", can(auth.ResourceObservations, auth.ActionRead), observationHandler.GetPatientObservations)
-
-	observations := protected.Group("/observations")
-	observations.POST("", can(auth.ResourceObservations, auth.ActionCreate), observationHandler.CreateObservation)
-	observations.GET("", can(auth.ResourceObservations, auth.ActionRead), observationHandler.GetObservations)
-	observations.GET("/:id", can(auth.ResourceObservations, auth.ActionRead), observationHandler.GetObservation)
-	observations.PUT("/:id", can(auth.ResourceObservations, auth.ActionUpdate), observationHandler.UpdateObservation)
-	observations.DELETE("/:id", can(auth.ResourceObservations, auth.ActionDelete), observationHandler.DeleteObservation)
 
 	srv := &http.Server{
 		Addr:              cfg.Addr(),
-		Handler:           r,
+		Handler:           router,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       cfg.ReadTimeout,
 		WriteTimeout:      cfg.WriteTimeout,
 		IdleTimeout:       cfg.IdleTimeout,
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	serveErr := make(chan error, 1)
 	go func() {

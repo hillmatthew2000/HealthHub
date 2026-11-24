@@ -51,6 +51,8 @@ type Config struct {
 	DBMinConns        int32
 	DBConnMaxLifetime time.Duration
 	DBConnMaxIdleTime time.Duration
+	// AutoMigrate applies pending migrations when the server starts.
+	AutoMigrate bool
 
 	// Authentication
 	JWTSecret         string
@@ -109,6 +111,7 @@ func LoadFrom(lookup func(string) (string, bool)) (*Config, error) {
 		DBMinConns:        r.int32("DB_MIN_CONNS", 2),
 		DBConnMaxLifetime: r.duration("DB_CONN_MAX_LIFETIME", time.Hour),
 		DBConnMaxIdleTime: r.duration("DB_CONN_MAX_IDLE_TIME", 15*time.Minute),
+		AutoMigrate:       r.boolean("DB_AUTO_MIGRATE", true),
 
 		JWTSecret:         r.str("JWT_SECRET", ""),
 		JWTIssuer:         r.str("JWT_ISSUER", "healthhub"),

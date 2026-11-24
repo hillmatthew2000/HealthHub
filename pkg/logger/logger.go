@@ -5,7 +5,9 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
-var Logger *zap.Logger
+// Logger is the process logger. It discards output until Init or
+// InitDevelopment is called, so packages can log safely in tests.
+var Logger = zap.NewNop()
 
 // Init initializes the logger with the specified level
 func Init(level string) {
@@ -163,13 +165,14 @@ func LogAuditEvent(action string, resource string, userID string, details map[st
 }
 
 // LogHTTPRequest logs an HTTP request
-func LogHTTPRequest(method string, path string, statusCode int, duration int64, userID string) {
+func LogHTTPRequest(method string, path string, statusCode int, duration int64, userID, requestID string) {
 	HTTPLogger().Info("HTTP request",
 		zap.String("method", method),
 		zap.String("path", path),
 		zap.Int("status_code", statusCode),
 		zap.Int64("duration_ms", duration),
 		zap.String("user_id", userID),
+		zap.String("request_id", requestID),
 	)
 }
 
