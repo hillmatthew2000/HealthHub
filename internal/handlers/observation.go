@@ -112,7 +112,7 @@ func (h *ObservationHandler) CreateObservation(c *gin.Context) {
 		writeObservationError(c, "create observation", err)
 		return
 	}
-	h.audit.Record(c, ActionCreate, "observation", o.ID)
+	audit(c, h.audit, ActionCreate, "observation", o.ID)
 	c.Header("Location", c.FullPath()+"/"+o.ID)
 	c.JSON(http.StatusCreated, o)
 }
@@ -142,7 +142,9 @@ func (h *ObservationHandler) list(c *gin.Context, f store.ObservationFilter, pag
 	for i := range observations {
 		ids[i] = observations[i].ID
 	}
-	h.audit.Record(c, ActionList, "observation", ids...)
+	if !audit(c, h.audit, ActionList, "observation", ids...) {
+		return
+	}
 	c.JSON(http.StatusOK, newPage(observations, pageNo, limit, total))
 }
 
@@ -194,7 +196,9 @@ func (h *ObservationHandler) GetObservation(c *gin.Context) {
 		storeError(c, "get observation", "Observation", err)
 		return
 	}
-	h.audit.Record(c, ActionRead, "observation", o.ID)
+	if !audit(c, h.audit, ActionRead, "observation", o.ID) {
+		return
+	}
 	c.JSON(http.StatusOK, o)
 }
 
@@ -213,7 +217,7 @@ func (h *ObservationHandler) UpdateObservation(c *gin.Context) {
 		writeObservationError(c, "update observation", err)
 		return
 	}
-	h.audit.Record(c, ActionUpdate, "observation", o.ID)
+	audit(c, h.audit, ActionUpdate, "observation", o.ID)
 	c.JSON(http.StatusOK, o)
 }
 
@@ -227,6 +231,6 @@ func (h *ObservationHandler) DeleteObservation(c *gin.Context) {
 		storeError(c, "delete observation", "Observation", err)
 		return
 	}
-	h.audit.Record(c, ActionDelete, "observation", id.String())
+	audit(c, h.audit, ActionDelete, "observation", id.String())
 	c.Status(http.StatusNoContent)
 }

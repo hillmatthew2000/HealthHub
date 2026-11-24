@@ -2,8 +2,9 @@
 //
 // Usage:
 //
-//	server [serve]   run the API (the default)
-//	server migrate   apply pending database migrations and exit
+//	server [serve]        run the API (the default)
+//	server migrate        apply pending database migrations and exit
+//	server create-admin   create an administrator account
 package main
 
 import (
@@ -34,13 +35,13 @@ import (
 var version = "dev"
 
 func main() {
-	if err := run(os.Args[1:], os.Stdout); err != nil {
+	if err := run(os.Args[1:], os.Stdin, os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, "healthhub:", err)
 		os.Exit(1)
 	}
 }
 
-func run(args []string, stdout io.Writer) error {
+func run(args []string, stdin io.Reader, stdout io.Writer) error {
 	cmd := "serve"
 	if len(args) > 0 {
 		cmd = args[0]
@@ -50,6 +51,8 @@ func run(args []string, stdout io.Writer) error {
 		return serve()
 	case "migrate":
 		return migrate(stdout)
+	case "create-admin":
+		return createAdmin(args[1:], stdin, stdout)
 	case "version":
 		_, err := fmt.Fprintln(stdout, version)
 		return err
@@ -64,9 +67,10 @@ func run(args []string, stdout io.Writer) error {
 const usage = `Usage: server <command>
 
 Commands:
-  serve     run the API (default)
-  migrate   apply pending database migrations and exit
-  version   print the version
+  serve          run the API (default)
+  migrate        apply pending database migrations and exit
+  create-admin   create an administrator account (see create-admin -h)
+  version        print the version
 `
 
 // setup loads the configuration and initialises logging.
@@ -180,6 +184,7 @@ func serve() error {
 		gin.SetMode(gin.ReleaseMode)
 	}
 	patients := store.NewPatients(db, keys)
+	auditLog := store.NewAuditLog(db)
 	router, err := server.New(server.Options{
 		Version:           version,
 		HSTS:              cfg.TLSEnabled || cfg.IsProduction(),
@@ -196,6 +201,8 @@ func serve() error {
 		Observations: store.NewObservations(db, keys),
 		Tokens:       tokens,
 		Passwords:    passwords,
+		Audit:        handlers.StoreAuditor{Events: auditLog},
+		AuditLog:     auditLog,
 	})
 	if err != nil {
 		return err

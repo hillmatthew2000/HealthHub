@@ -59,7 +59,7 @@ func (h *PatientHandler) CreatePatient(c *gin.Context) {
 		storeError(c, "create patient", "Patient", err)
 		return
 	}
-	h.audit.Record(c, ActionCreate, "patient", p.ID)
+	audit(c, h.audit, ActionCreate, "patient", p.ID)
 	c.Header("Location", c.FullPath()+"/"+p.ID)
 	c.JSON(http.StatusCreated, p)
 }
@@ -99,7 +99,9 @@ func (h *PatientHandler) GetPatients(c *gin.Context) {
 	for i := range patients {
 		ids[i] = patients[i].ID
 	}
-	h.audit.Record(c, ActionList, "patient", ids...)
+	if !audit(c, h.audit, ActionList, "patient", ids...) {
+		return
+	}
 	c.JSON(http.StatusOK, newPage(patients, pageNo, limit, total))
 }
 
@@ -114,7 +116,9 @@ func (h *PatientHandler) GetPatient(c *gin.Context) {
 		storeError(c, "get patient", "Patient", err)
 		return
 	}
-	h.audit.Record(c, ActionRead, "patient", p.ID)
+	if !audit(c, h.audit, ActionRead, "patient", p.ID) {
+		return
+	}
 	c.JSON(http.StatusOK, p)
 }
 
@@ -133,7 +137,7 @@ func (h *PatientHandler) UpdatePatient(c *gin.Context) {
 		storeError(c, "update patient", "Patient", err)
 		return
 	}
-	h.audit.Record(c, ActionUpdate, "patient", p.ID)
+	audit(c, h.audit, ActionUpdate, "patient", p.ID)
 	c.JSON(http.StatusOK, p)
 }
 
@@ -148,6 +152,6 @@ func (h *PatientHandler) DeletePatient(c *gin.Context) {
 		storeError(c, "delete patient", "Patient", err)
 		return
 	}
-	h.audit.Record(c, ActionDelete, "patient", id.String())
+	audit(c, h.audit, ActionDelete, "patient", id.String())
 	c.Status(http.StatusNoContent)
 }

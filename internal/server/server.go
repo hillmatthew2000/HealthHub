@@ -48,7 +48,12 @@ type Deps struct {
 	Observations handlers.ObservationStore
 	Tokens       Tokens
 	Passwords    *auth.PasswordHasher
-	Audit        handlers.Auditor
+	// Audit records access to PHI and account changes. It defaults to
+	// handlers.LogAuditor.
+	Audit handlers.Auditor
+	// AuditLog serves the audit trail to administrators. The audit-events
+	// route is only registered when it is set.
+	AuditLog handlers.AuditEventStore
 }
 
 // New returns the API router.
@@ -94,6 +99,7 @@ func New(opts Options, deps Deps) (*gin.Engine, error) {
 	authHandler := handlers.NewAuthHandler(deps.Users, deps.Tokens, deps.Passwords, opts.AllowRegistration)
 	patientHandler := handlers.NewPatientHandler(deps.Patients, deps.Audit, opts.Paging)
 	observationHandler := handlers.NewObservationHandler(deps.Observations, deps.Patients, deps.Audit, opts.Paging)
+	userHandler := handlers.NewUserHandler(deps.Users, deps.Passwords, deps.Audit, opts.Paging)
 
 	api := r.Group("/api/v1")
 	api.POST("/auth/login", authHandler.Login)
@@ -122,6 +128,17 @@ func New(opts Options, deps Deps) (*gin.Engine, error) {
 	observations.GET("/:id", can(auth.ResourceObservations, auth.ActionRead), observationHandler.GetObservation)
 	observations.PUT("/:id", can(auth.ResourceObservations, auth.ActionUpdate), observationHandler.UpdateObservation)
 	observations.DELETE("/:id", can(auth.ResourceObservations, auth.ActionDelete), observationHandler.DeleteObservation)
+
+	users := protected.Group("/users")
+	users.POST("", can(auth.ResourceUsers, auth.ActionCreate), userHandler.CreateUser)
+	users.GET("", can(auth.ResourceUsers, auth.ActionRead), userHandler.GetUsers)
+	users.GET("/:id", can(auth.ResourceUsers, auth.ActionRead), userHandler.GetUser)
+	users.PATCH("/:id", can(auth.ResourceUsers, auth.ActionUpdate), userHandler.UpdateUser)
+
+	if deps.AuditLog != nil {
+		auditHandler := handlers.NewAuditHandler(deps.AuditLog, opts.Paging)
+		protected.GET("/audit-events", can(auth.ResourceAuditLog, auth.ActionRead), auditHandler.GetAuditEvents)
+	}
 
 	return r, nil
 }

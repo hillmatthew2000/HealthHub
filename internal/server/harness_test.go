@@ -90,6 +90,7 @@ func newEnv(t *testing.T, opts ...envOption) *env {
 		Tokens:       tokens,
 		Passwords:    passwords,
 		Audit:        e.audit,
+		AuditLog:     e.audit,
 	}
 	for _, opt := range opts {
 		opt(&o, &d)

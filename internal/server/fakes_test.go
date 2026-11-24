@@ -94,6 +94,8 @@ func (f *fakeUsers) List(_ context.Context, page store.Page) ([]models.User, int
 	return window(all, page), len(all), nil
 }
 
+// Update mirrors the store's guard against removing the last active
+// administrator.
 func (f *fakeUsers) Update(_ context.Context, id uuid.UUID, upd store.UserUpdate) (*models.User, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -104,11 +106,17 @@ func (f *fakeUsers) Update(_ context.Context, id uuid.UUID, upd store.UserUpdate
 	if !ok {
 		return nil, store.ErrNotFound
 	}
+	before := f.admins()
+	old := *u
 	if upd.Roles != nil {
 		u.Roles = append([]string{}, *upd.Roles...)
 	}
 	if upd.Active != nil {
 		u.Active = *upd.Active
+	}
+	if before > 0 && f.admins() == 0 {
+		*u = old
+		return nil, store.ErrLastAdmin
 	}
 	cp := *u
 	return &cp, nil
@@ -138,19 +146,14 @@ func (f *fakeUsers) RecordLogin(_ context.Context, id uuid.UUID) error {
 	return f.err
 }
 
-func (f *fakeUsers) CountAdmins(_ context.Context) (int, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.err != nil {
-		return 0, f.err
-	}
+func (f *fakeUsers) admins() int {
 	n := 0
 	for _, u := range f.byID {
 		if u.Active && slices.Contains(u.Roles, string(auth.RoleAdmin)) {
 			n++
 		}
 	}
-	return n, nil
+	return n
 }
 
 type fakePatients struct {
@@ -362,35 +365,52 @@ type fakePinger struct{ err error }
 
 func (p fakePinger) Ping(context.Context) error { return p.err }
 
-// auditEvent is one recorded call to the auditor.
-type auditEvent struct {
-	Actor        string
-	Action       handlers.AuditAction
-	ResourceType string
-	IDs          []string
-}
-
+// fakeAuditor records audit events in memory and serves them as the
+// audit trail. Setting err makes recording fail.
 type fakeAuditor struct {
 	mu     sync.Mutex
-	events []auditEvent
+	events []models.AuditEvent
+	err    error
 }
 
-func (a *fakeAuditor) Record(c *gin.Context, action handlers.AuditAction, resourceType string, ids ...string) {
+func (a *fakeAuditor) Record(c *gin.Context, action handlers.AuditAction, resourceType string, ids ...string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.events = append(a.events, auditEvent{
-		Actor:        c.GetString(auth.UserIDKey),
-		Action:       action,
+	if a.err != nil {
+		return a.err
+	}
+	a.events = append(a.events, models.AuditEvent{
+		ID:           int64(len(a.events) + 1),
+		OccurredAt:   time.Now().UTC(),
+		ActorID:      c.GetString(auth.UserIDKey),
+		Action:       string(action),
 		ResourceType: resourceType,
-		IDs:          append([]string{}, ids...),
+		ResourceIDs:  append([]string{}, ids...),
 	})
+	return nil
 }
 
-func (a *fakeAuditor) last() (auditEvent, bool) {
+// List filters by actor and resource type; the rest is covered by the
+// store's integration tests.
+func (a *fakeAuditor) List(_ context.Context, f store.AuditFilter, page store.Page) ([]models.AuditEvent, int, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	var out []models.AuditEvent
+	for i := len(a.events) - 1; i >= 0; i-- {
+		e := a.events[i]
+		if (f.ActorID == nil || e.ActorID == f.ActorID.String()) &&
+			(f.ResourceType == "" || e.ResourceType == f.ResourceType) {
+			out = append(out, e)
+		}
+	}
+	return window(out, page), len(out), nil
+}
+
+func (a *fakeAuditor) last() (models.AuditEvent, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if len(a.events) == 0 {
-		return auditEvent{}, false
+		return models.AuditEvent{}, false
 	}
 	return a.events[len(a.events)-1], true
 }

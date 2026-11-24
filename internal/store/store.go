@@ -22,6 +22,8 @@ var (
 	ErrConflict = errors.New("store: conflict")
 	// ErrInvalidReference means a foreign key pointed at a missing row.
 	ErrInvalidReference = errors.New("store: invalid reference")
+	// ErrLastAdmin means a change would leave no active administrator.
+	ErrLastAdmin = errors.New("store: at least one active administrator is required")
 )
 
 // PoolConfig configures the connection pool.
@@ -70,6 +72,7 @@ func Open(ctx context.Context, cfg PoolConfig) (*pgxpool.Pool, error) {
 
 // DB is the subset of pgxpool.Pool and pgx.Tx used by the repositories.
 type DB interface {
+	Begin(ctx context.Context) (pgx.Tx, error)
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row

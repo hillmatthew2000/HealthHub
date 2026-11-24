@@ -36,9 +36,14 @@ func TestAccessPolicy(t *testing.T) {
 		readObs        = route{http.MethodGet, oPath, nil}
 		updateObs      = route{http.MethodPut, oPath, func() any { return observationBody(patient.ID) }}
 		deleteObs      = route{http.MethodDelete, "/api/v1/observations/" + uuid.NewString(), nil}
+		createUser     = route{http.MethodPost, "/api/v1/users", func() any { return newUserBody(uuid.NewString() + "@example.org") }}
+		listUsers      = route{http.MethodGet, "/api/v1/users", nil}
+		readUser       = route{http.MethodGet, "/api/v1/users/" + uuid.NewString(), nil}
+		updateUser     = route{http.MethodPatch, "/api/v1/users/" + uuid.NewString(), func() any { return map[string]any{"active": true} }}
+		auditEvents    = route{http.MethodGet, "/api/v1/audit-events", nil}
 	)
 	all := []route{createPatientR, listPatients, readPatient, updatePatient, deletePatient, patientObs,
-		createObs, listObs, readObs, updateObs, deleteObs}
+		createObs, listObs, readObs, updateObs, deleteObs, createUser, listUsers, readUser, updateUser, auditEvents}
 
 	allowed := map[auth.Role][]route{
 		auth.RoleAdmin:        all,

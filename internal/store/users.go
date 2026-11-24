@@ -108,7 +108,9 @@ type UserUpdate struct {
 	Active *bool
 }
 
-// Update applies upd to the user and returns the updated row.
+// Update applies upd to the user and returns the updated row. It returns
+// ErrLastAdmin, and changes nothing, if the update would demote or
+// deactivate the only remaining active administrator.
 func (r *Users) Update(ctx context.Context, id uuid.UUID, upd UserUpdate) (*models.User, error) {
 	var roles []string
 	if upd.Roles != nil {
@@ -117,14 +119,46 @@ func (r *Users) Update(ctx context.Context, id uuid.UUID, upd UserUpdate) (*mode
 			roles = []string{}
 		}
 	}
-	return scanUser(r.db.QueryRow(ctx, `
-		UPDATE users SET
-			roles      = CASE WHEN $2::boolean THEN $3::text[] ELSE roles END,
-			active     = COALESCE($4, active),
-			updated_at = $5
-		WHERE id = $1
-		RETURNING `+userColumns,
-		id, upd.Roles != nil, roles, upd.Active, r.now().UTC()))
+	var user *models.User
+	err := pgx.BeginFunc(ctx, r.db, func(tx pgx.Tx) error {
+		// Lock the active administrators first, so concurrent updates that
+		// each remove a different one are serialised and cannot together
+		// remove them all.
+		var before int
+		err := tx.QueryRow(ctx, `
+			SELECT count(*) FROM (
+				SELECT 1 FROM users WHERE active AND 'admin' = ANY (roles) FOR UPDATE
+			) AS admins`).Scan(&before)
+		if err != nil {
+			return mapError(err)
+		}
+		u, err := scanUser(tx.QueryRow(ctx, `
+			UPDATE users SET
+				roles      = CASE WHEN $2::boolean THEN $3::text[] ELSE roles END,
+				active     = COALESCE($4, active),
+				updated_at = $5
+			WHERE id = $1
+			RETURNING `+userColumns,
+			id, upd.Roles != nil, roles, upd.Active, r.now().UTC()))
+		if err != nil {
+			return err
+		}
+		if before > 0 {
+			after, err := countAdmins(ctx, tx)
+			if err != nil {
+				return err
+			}
+			if after == 0 {
+				return ErrLastAdmin
+			}
+		}
+		user = u
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return user, nil
 }
 
 // SetPassword replaces the user's password hash.
@@ -148,8 +182,12 @@ func (r *Users) RecordLogin(ctx context.Context, id uuid.UUID) error {
 
 // CountAdmins returns the number of active administrators.
 func (r *Users) CountAdmins(ctx context.Context) (int, error) {
+	return countAdmins(ctx, r.db)
+}
+
+func countAdmins(ctx context.Context, db DB) (int, error) {
 	var n int
-	err := r.db.QueryRow(ctx, `SELECT count(*) FROM users WHERE active AND 'admin' = ANY (roles)`).Scan(&n)
+	err := db.QueryRow(ctx, `SELECT count(*) FROM users WHERE active AND 'admin' = ANY (roles)`).Scan(&n)
 	return n, mapError(err)
 }
 

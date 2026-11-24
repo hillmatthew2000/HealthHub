@@ -37,7 +37,7 @@ func TestCreateObservation(t *testing.T) {
 	if loc := w.Header().Get("Location"); loc != "/api/v1/observations/"+o.ID {
 		t.Errorf("Location = %q", loc)
 	}
-	if ev, _ := e.audit.last(); ev.Action != handlers.ActionCreate || ev.ResourceType != "observation" {
+	if ev, _ := e.audit.last(); ev.Action != string(handlers.ActionCreate) || ev.ResourceType != "observation" {
 		t.Errorf("audit event = %+v", ev)
 	}
 }
@@ -148,7 +148,7 @@ func TestListObservations(t *testing.T) {
 	if page := decode[handlers.PageResponse[models.Observation]](t, w); page.Total != 1 {
 		t.Errorf("observations for patient 2 = %+v", page)
 	}
-	if ev, _ := e.audit.last(); ev.Action != handlers.ActionList || len(ev.IDs) != 1 {
+	if ev, _ := e.audit.last(); ev.Action != string(handlers.ActionList) || len(ev.ResourceIDs) != 1 {
 		t.Errorf("audit event = %+v", ev)
 	}
 

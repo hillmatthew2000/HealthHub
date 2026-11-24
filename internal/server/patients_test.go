@@ -48,8 +48,8 @@ func TestCreatePatient(t *testing.T) {
 		t.Errorf("Location = %q", loc)
 	}
 	ev, _ := e.audit.last()
-	if ev.Action != handlers.ActionCreate || ev.ResourceType != "patient" || ev.Actor != doc.ID ||
-		len(ev.IDs) != 1 || ev.IDs[0] != p.ID {
+	if ev.Action != string(handlers.ActionCreate) || ev.ResourceType != "patient" || ev.ActorID != doc.ID ||
+		len(ev.ResourceIDs) != 1 || ev.ResourceIDs[0] != p.ID {
 		t.Errorf("audit event = %+v", ev)
 	}
 }
@@ -109,7 +109,7 @@ func TestGetPatient(t *testing.T) {
 	if got := decode[models.Patient](t, w); got.ID != created.ID || got.FullName() != "Ana Rivera" {
 		t.Errorf("patient = %+v", got)
 	}
-	if ev, _ := e.audit.last(); ev.Action != handlers.ActionRead || ev.IDs[0] != created.ID {
+	if ev, _ := e.audit.last(); ev.Action != string(handlers.ActionRead) || ev.ResourceIDs[0] != created.ID {
 		t.Errorf("audit event = %+v", ev)
 	}
 	if cc := w.Header().Get("Cache-Control"); cc != "no-store" {
@@ -136,7 +136,7 @@ func TestListPatients(t *testing.T) {
 	if page.Page != 2 || page.Limit != 2 || page.Total != 3 || page.TotalPages != 2 || len(page.Data) != 1 {
 		t.Errorf("page = %+v", page)
 	}
-	if ev, _ := e.audit.last(); ev.Action != handlers.ActionList || len(ev.IDs) != 1 || ev.IDs[0] != page.Data[0].ID {
+	if ev, _ := e.audit.last(); ev.Action != string(handlers.ActionList) || len(ev.ResourceIDs) != 1 || ev.ResourceIDs[0] != page.Data[0].ID {
 		t.Errorf("audit event = %+v; only the returned records should be logged", ev)
 	}
 
@@ -197,7 +197,7 @@ func TestUpdatePatient(t *testing.T) {
 	if got.ID != created.ID || got.Gender != "other" || got.Active || got.CreatedBy != created.CreatedBy {
 		t.Errorf("updated patient = %+v", got)
 	}
-	if ev, _ := e.audit.last(); ev.Action != handlers.ActionUpdate {
+	if ev, _ := e.audit.last(); ev.Action != string(handlers.ActionUpdate) {
 		t.Errorf("audit event = %+v", ev)
 	}
 
@@ -215,7 +215,7 @@ func TestDeletePatient(t *testing.T) {
 	admin := e.tokenFor(auth.RoleAdmin)
 
 	wantStatus(t, e.do(http.MethodDelete, "/api/v1/patients/"+created.ID, admin, nil), http.StatusNoContent)
-	if ev, _ := e.audit.last(); ev.Action != handlers.ActionDelete || ev.IDs[0] != created.ID {
+	if ev, _ := e.audit.last(); ev.Action != string(handlers.ActionDelete) || ev.ResourceIDs[0] != created.ID {
 		t.Errorf("audit event = %+v", ev)
 	}
 	wantProblem(t, e.do(http.MethodDelete, "/api/v1/patients/"+created.ID, admin, nil),

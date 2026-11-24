@@ -33,6 +33,7 @@ const (
 	ResourcePatients     Resource = "patients"
 	ResourceObservations Resource = "observations"
 	ResourceUsers        Resource = "users"
+	ResourceAuditLog     Resource = "audit-log"
 )
 
 // Action is an operation on a resource.
@@ -54,6 +55,7 @@ var permissions = map[Role]map[Resource][]Action{
 		ResourcePatients:     crud,
 		ResourceObservations: crud,
 		ResourceUsers:        crud,
+		ResourceAuditLog:     {ActionRead},
 	},
 	RolePractitioner: {
 		ResourcePatients:     {ActionCreate, ActionRead, ActionUpdate},
