@@ -144,19 +144,25 @@ func (e *env) tokenFor(roles ...auth.Role) string {
 // encoded as JSON.
 func (e *env) do(method, path, token string, body any) *httptest.ResponseRecorder {
 	e.t.Helper()
-	var r io.Reader
+	return e.serve(httptest.NewRequest(method, path, nil), token, body)
+}
+
+// serve attaches the token and body to req and runs it through the router.
+func (e *env) serve(req *http.Request, token string, body any) *httptest.ResponseRecorder {
+	e.t.Helper()
 	switch b := body.(type) {
 	case nil:
 	case string:
-		r = strings.NewReader(b)
+		req.Body = io.NopCloser(strings.NewReader(b))
+		req.ContentLength = int64(len(b))
 	default:
 		buf, err := json.Marshal(b)
 		if err != nil {
 			e.t.Fatal(err)
 		}
-		r = bytes.NewReader(buf)
+		req.Body = io.NopCloser(bytes.NewReader(buf))
+		req.ContentLength = int64(len(buf))
 	}
-	req := httptest.NewRequest(method, path, r)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}

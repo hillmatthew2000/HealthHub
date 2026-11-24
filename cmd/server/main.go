@@ -129,6 +129,13 @@ func migrate(stdout io.Writer) error {
 	return err
 }
 
+func rateLimit(cfg *config.Config) server.RateLimit {
+	if !cfg.RateLimitEnabled {
+		return server.RateLimit{}
+	}
+	return server.RateLimit{PerMinute: cfg.RateLimitRPM, AuthPerMinute: cfg.AuthRateLimitRPM}
+}
+
 func serve() error {
 	cfg, err := setup()
 	if err != nil {
@@ -194,6 +201,7 @@ func serve() error {
 		RequestTimeout:    cfg.RequestTimeout,
 		Paging:            handlers.Paging{DefaultLimit: cfg.DefaultPageSize, MaxLimit: cfg.MaxPageSize},
 		AllowRegistration: cfg.AllowRegistration,
+		RateLimit:         rateLimit(cfg),
 	}, server.Deps{
 		DB:           db,
 		Users:        store.NewUsers(db),

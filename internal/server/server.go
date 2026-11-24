@@ -26,6 +26,25 @@ type Options struct {
 	RequestTimeout    time.Duration
 	Paging            handlers.Paging
 	AllowRegistration bool
+	RateLimit         RateLimit
+}
+
+// RateLimit configures per-client request limits. Zero limits disable
+// limiting.
+type RateLimit struct {
+	// PerMinute applies to every API request.
+	PerMinute int
+	// AuthPerMinute additionally applies to the endpoints that check a
+	// password: login, registration and password changes.
+	AuthPerMinute int
+}
+
+// limit returns a rate limiting middleware, or a no-op when perMinute is 0.
+func limit(perMinute int, scope string) gin.HandlerFunc {
+	if perMinute <= 0 {
+		return func(c *gin.Context) { c.Next() }
+	}
+	return middleware.RateLimit(middleware.NewLimiter(perMinute), scope)
 }
 
 // Tokens issues and verifies access tokens.
@@ -101,9 +120,14 @@ func New(opts Options, deps Deps) (*gin.Engine, error) {
 	observationHandler := handlers.NewObservationHandler(deps.Observations, deps.Patients, deps.Audit, opts.Paging)
 	userHandler := handlers.NewUserHandler(deps.Users, deps.Passwords, deps.Audit, opts.Paging)
 
+	// Password checks get their own, stricter limit to slow down password
+	// guessing; it is shared by the three endpoints.
+	authLimit := limit(opts.RateLimit.AuthPerMinute, "authentication")
+
 	api := r.Group("/api/v1")
-	api.POST("/auth/login", authHandler.Login)
-	api.POST("/auth/register", authHandler.Register)
+	api.Use(limit(opts.RateLimit.PerMinute, "API"))
+	api.POST("/auth/login", authLimit, authHandler.Login)
+	api.POST("/auth/register", authLimit, authHandler.Register)
 
 	protected := api.Group("")
 	protected.Use(auth.Authenticate(deps.Tokens))
@@ -111,7 +135,7 @@ func New(opts Options, deps Deps) (*gin.Engine, error) {
 	authRoutes := protected.Group("/auth")
 	authRoutes.POST("/refresh", authHandler.RefreshToken)
 	authRoutes.GET("/profile", authHandler.GetProfile)
-	authRoutes.POST("/change-password", authHandler.ChangePassword)
+	authRoutes.POST("/change-password", authLimit, authHandler.ChangePassword)
 
 	can := auth.Require
 	patients := protected.Group("/patients")
