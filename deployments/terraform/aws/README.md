@@ -72,24 +72,36 @@ aws eks update-kubeconfig --region us-west-2 --name healthhub-dev-eks
 
 ### 6. Build and Push Application Image
 ```bash
-# Build the Docker image
-docker build -t healthcare-api .
-
-# Tag and push to ECR (replace with your ECR URL from Terraform output)
+# The repository has immutable tags: push each build under a new tag.
 ECR_URL=$(terraform output -raw ecr_repository_url)
-docker tag healthcare-api:latest $ECR_URL:latest
-docker push $ECR_URL:latest
+TAG=$(git rev-parse HEAD)
+aws ecr get-login-password --region us-west-2 | docker login --username AWS --password-stdin "${ECR_URL%%/*}"
+docker build -f ../../docker/Dockerfile -t "$ECR_URL:$TAG" ../../..
+docker push "$ECR_URL:$TAG"
 ```
 
 ### 7. Deploy Application to Kubernetes
-```bash
-# Apply Kubernetes manifests
-kubectl apply -f ../k8s/
 
-# Check deployment status
-kubectl get pods -n healthcare-api
-kubectl get services -n healthcare-api
+Terraform has already created the `healthcare-api` namespace and the
+`healthcare-api-secrets` Secret (database URL, JWT secret and encryption
+key). The workload itself comes from `deployments/k8s`:
+
+```bash
+cd ../../k8s
+kustomize edit set image healthcare-api="$ECR_URL:$TAG"
+kubectl apply -k .
+kubectl rollout status deployment/healthcare-api -n healthcare-api
 ```
+
+Earlier versions of this configuration also managed the Deployment,
+Service, autoscaler and ConfigMap from Terraform, with the credentials in
+two Secrets named `healthcare-api-db-secret` and `healthcare-api-app-secret`.
+On such a state `terraform apply` forgets the workload objects without
+deleting them, creates `healthcare-api-secrets` and deletes the two old
+Secrets; running pods keep their environment. Then apply the kustomization,
+which adopts the existing objects and rolls the pods onto the new Secret.
+The old Service was a `LoadBalancer`; the kustomization turns it into a
+`ClusterIP` Service behind the ingress, which releases that load balancer.
 
 ## Detailed Configuration
 
@@ -235,7 +247,7 @@ kubectl get events -n healthcare-api --sort-by='.lastTimestamp'
 ```bash
 # Verify secrets are properly created
 kubectl get secrets -n healthcare-api
-kubectl describe secret healthcare-api-db-secret -n healthcare-api
+kubectl describe secret healthcare-api-secrets -n healthcare-api
 
 # Test database connectivity from within cluster
 kubectl run -it --rm debug --image=postgres:15 --restart=Never -- bash
@@ -301,8 +313,8 @@ curl http://<load-balancer-url>/metrics
 
 3. **Manual Deployment**:
    ```bash
-   # Trigger manual deployment via GitHub Actions
-   gh workflow run deploy.yml -f environment=prod -f action=apply
+   # Run Terraform for an environment through GitHub Actions
+   gh workflow run terraform.yml -f environment=prod -f action=plan
    ```
 
 ## Cost Optimization

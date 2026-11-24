@@ -3,12 +3,78 @@ resource "aws_kms_key" "main" {
   description             = "KMS key for ${var.project_name}-${var.environment}"
   deletion_window_in_days = 7
   enable_key_rotation     = true
+  policy                  = data.aws_iam_policy_document.kms_main.json
 
   tags = {
     Name        = "${var.project_name}-${var.environment}-kms"
     Environment = var.environment
   }
 }
+
+# The account keeps full control of the key through IAM. AWS services that
+# encrypt with it on their own behalf (rather than through a caller's IAM
+# permissions) must also be named in the key policy: CloudWatch Logs for the
+# encrypted log groups, CloudWatch alarms publishing to the encrypted SNS
+# topic, and CloudTrail for the trail.
+data "aws_iam_policy_document" "kms_main" {
+  statement {
+    sid       = "AccountAdministration"
+    actions   = ["kms:*"]
+    resources = ["*"]
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:root"]
+    }
+  }
+
+  statement {
+    sid = "CloudWatchLogs"
+    actions = [
+      "kms:Encrypt*",
+      "kms:Decrypt*",
+      "kms:ReEncrypt*",
+      "kms:GenerateDataKey*",
+      "kms:Describe*",
+    ]
+    resources = ["*"]
+    principals {
+      type        = "Service"
+      identifiers = ["logs.${var.aws_region}.amazonaws.com"]
+    }
+    condition {
+      test     = "ArnLike"
+      variable = "kms:EncryptionContext:aws:logs:arn"
+      values   = ["arn:${data.aws_partition.current.partition}:logs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:*"]
+    }
+  }
+
+  statement {
+    sid       = "CloudWatchAlarmsToSNS"
+    actions   = ["kms:Decrypt", "kms:GenerateDataKey*"]
+    resources = ["*"]
+    principals {
+      type        = "Service"
+      identifiers = ["cloudwatch.amazonaws.com"]
+    }
+  }
+
+  statement {
+    sid       = "CloudTrail"
+    actions   = ["kms:GenerateDataKey*", "kms:DescribeKey"]
+    resources = ["*"]
+    principals {
+      type        = "Service"
+      identifiers = ["cloudtrail.amazonaws.com"]
+    }
+    condition {
+      test     = "StringLike"
+      variable = "kms:EncryptionContext:aws:cloudtrail:arn"
+      values   = ["arn:${data.aws_partition.current.partition}:cloudtrail:*:${data.aws_caller_identity.current.account_id}:trail/*"]
+    }
+  }
+}
+
+data "aws_partition" "current" {}
 
 resource "aws_kms_alias" "main" {
   name          = "alias/${var.project_name}-${var.environment}"
@@ -135,6 +201,8 @@ resource "aws_db_parameter_group" "postgres" {
 resource "random_password" "db_password" {
   length  = 32
   special = true
+  # RDS rejects "/", "@", '"' and spaces in master passwords.
+  override_special = "!#$%&*()-_=+[]{}<>:?"
 }
 
 # RDS Instance

@@ -61,6 +61,18 @@ variable "kubernetes_version" {
   default     = "1.28"
 }
 
+variable "eks_public_access" {
+  description = "Expose the EKS API server endpoint publicly. The deploy workflow runs on GitHub-hosted runners and needs it unless it is moved inside the VPC."
+  type        = bool
+  default     = true
+}
+
+variable "eks_public_access_cidrs" {
+  description = "CIDR blocks allowed to reach the public EKS API server endpoint"
+  type        = list(string)
+  default     = ["0.0.0.0/0"] # Restrict this, for example to your office and CI egress ranges
+}
+
 variable "node_instance_types" {
   description = "Instance types for EKS worker nodes"
   type        = list(string)
@@ -126,43 +138,6 @@ variable "db_deletion_protection" {
   description = "Enable deletion protection for RDS instance"
   type        = bool
   default     = true
-}
-
-# Application Configuration
-variable "app_image_tag" {
-  description = "Docker image tag for the healthcare API"
-  type        = string
-  default     = "latest"
-}
-
-variable "app_replicas" {
-  description = "Number of application replicas"
-  type        = number
-  default     = 3
-}
-
-variable "app_cpu_request" {
-  description = "CPU request for application pods"
-  type        = string
-  default     = "100m"
-}
-
-variable "app_cpu_limit" {
-  description = "CPU limit for application pods"
-  type        = string
-  default     = "500m"
-}
-
-variable "app_memory_request" {
-  description = "Memory request for application pods"
-  type        = string
-  default     = "128Mi"
-}
-
-variable "app_memory_limit" {
-  description = "Memory limit for application pods"
-  type        = string
-  default     = "512Mi"
 }
 
 # Security Configuration

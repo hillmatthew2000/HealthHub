@@ -73,7 +73,8 @@ jobs:
 
       # tfsec has been folded into Trivy. Findings are published to code
       # scanning rather than failing the build; the remaining ones are
-      # deliberate design choices (public EKS endpoint, open egress).
+      # deliberate design choices (open egress, and the public EKS endpoint
+      # while eks_public_access_cidrs is left at its default).
       - name: Trivy config scan
         uses: aquasecurity/trivy-action@v0.36.0
         with:

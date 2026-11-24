@@ -5,6 +5,7 @@
 //	server [serve]        run the API (the default)
 //	server migrate        apply pending database migrations and exit
 //	server create-admin   create an administrator account
+//	server healthcheck    probe a running server (for container health checks)
 package main
 
 import (
@@ -53,6 +54,8 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 		return migrate(stdout)
 	case "create-admin":
 		return createAdmin(args[1:], stdin, stdout)
+	case "healthcheck":
+		return healthcheck(args[1:], stdout)
 	case "version":
 		_, err := fmt.Fprintln(stdout, version)
 		return err
@@ -70,6 +73,7 @@ Commands:
   serve          run the API (default)
   migrate        apply pending database migrations and exit
   create-admin   create an administrator account (see create-admin -h)
+  healthcheck    exit non-zero unless the local server is ready
   version        print the version
 `
 

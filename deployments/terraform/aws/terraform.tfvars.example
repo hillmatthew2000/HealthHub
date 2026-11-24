@@ -17,20 +17,16 @@ node_desired_capacity = 2
 node_max_capacity     = 5
 node_min_capacity     = 1
 
+# Restrict who can reach the Kubernetes API server
+eks_public_access       = true
+eks_public_access_cidrs = ["0.0.0.0/0"]
+
 # Database Configuration (smaller for dev)
 db_instance_class           = "db.t3.micro"
 db_allocated_storage        = 20
 db_max_allocated_storage    = 50
 db_backup_retention_period  = 3
 db_deletion_protection      = false
-
-# Application Configuration
-app_image_tag      = "latest"
-app_replicas       = 2
-app_cpu_request    = "100m"
-app_cpu_limit      = "300m"
-app_memory_request = "128Mi"
-app_memory_limit   = "256Mi"
 
 # Security Configuration (more permissive for dev)
 allowed_cidr_blocks = ["0.0.0.0/0"]

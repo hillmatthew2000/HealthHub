@@ -1,0 +1,7 @@
+# Only the Go module is needed to build the image.
+.git
+.github
+deployments
+*.md
+coverage.out
+bin/

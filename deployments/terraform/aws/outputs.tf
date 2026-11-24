@@ -89,12 +89,6 @@ output "db_subnet_group_name" {
   value       = aws_db_subnet_group.postgres.name
 }
 
-# Load Balancer Outputs
-output "load_balancer_dns_name" {
-  description = "DNS name of the load balancer"
-  value       = data.kubernetes_service.app_service.status[0].load_balancer[0].ingress[0].hostname
-}
-
 # Security Outputs
 output "kms_key_id" {
   description = "KMS key ID for encryption"

@@ -2,6 +2,9 @@ package main
 
 import (
 	"bytes"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -48,5 +51,37 @@ func TestReadPassword(t *testing.T) {
 	t.Setenv(adminPasswordEnv, "from the environment")
 	if p, err := readPassword(strings.NewReader("ignored\n")); err != nil || p != "from the environment" {
 		t.Errorf("readPassword = %q, %v", p, err)
+	}
+}
+
+func TestHealthcheck(t *testing.T) {
+	status := http.StatusOK
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/health/ready" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(status)
+	}))
+	defer srv.Close()
+
+	if err := run([]string{"healthcheck", "-url", srv.URL + "/health/ready"}, nil, io.Discard); err != nil {
+		t.Errorf("healthy server: %v", err)
+	}
+	status = http.StatusServiceUnavailable
+	if err := run([]string{"healthcheck", "-url", srv.URL + "/health/ready"}, nil, io.Discard); err == nil {
+		t.Error("unready server reported healthy")
+	}
+	srv.Close()
+	if err := run([]string{"healthcheck", "-url", srv.URL + "/health/ready", "-timeout", "1s"}, nil, io.Discard); err == nil {
+		t.Error("unreachable server reported healthy")
+	}
+}
+
+func TestDefaultHealthURL(t *testing.T) {
+	t.Setenv("PORT", "9000")
+	t.Setenv("TLS_ENABLED", "true")
+	if got := defaultHealthURL(); got != "https://localhost:9000/health/ready" {
+		t.Errorf("defaultHealthURL = %q", got)
 	}
 }

@@ -9,9 +9,14 @@ data:
   ENVIRONMENT: "production"
   LOG_LEVEL: "info"
   PORT: "8080"
-  ALLOWED_ORIGINS: "https://yourdomain.com,https://app.yourdomain.com"
+  ALLOWED_ORIGINS: "https://app.yourdomain.com"
+  # Addresses allowed to set X-Forwarded-For: the ingress controller pods.
+  # With the AWS VPC CNI pods take addresses from the VPC, so this is the
+  # VPC CIDR from Terraform (vpc_cidr). Without it every request appears to
+  # come from the ingress controller and all clients share one rate limit.
+  TRUSTED_PROXIES: "10.0.0.0/16"
   RATE_LIMIT_ENABLED: "true"
-  RATE_LIMIT_RPM: "100"
-  DEFAULT_PAGE_SIZE: "10"
+  RATE_LIMIT_RPM: "300"
+  AUTH_RATE_LIMIT_RPM: "10"
+  DEFAULT_PAGE_SIZE: "20"
   MAX_PAGE_SIZE: "100"
-  HEALTH_CHECK_PATH: "/health"
