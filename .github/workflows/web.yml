@@ -1,0 +1,69 @@
+name: Web
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'web/**'
+      - '.github/workflows/web.yml'
+  pull_request:
+    paths:
+      - 'web/**'
+      - '.github/workflows/web.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: web-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Lint, typecheck, test and build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  image:
+    name: Container image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build image
+        run: docker build -t healthhub-web:ci web
+
+      - name: Smoke test runtime config and SPA fallback
+        run: |
+          docker run -d --name web -p 8082:80 -e API_BASE_URL=http://192.168.1.96:8081/ healthhub-web:ci
+          for i in $(seq 1 20); do curl -fsS http://localhost:8082/healthz && break; sleep 1; done
+          echo "--- /config.js"
+          curl -fsS -D headers.txt http://localhost:8082/config.js | tee config.js
+          grep -q 'apiBaseUrl: "http://192.168.1.96:8081"' config.js
+          grep -qi '^cache-control: no-cache' headers.txt
+          echo "--- SPA fallback"
+          curl -fsS -D spa.txt http://localhost:8082/patients/some-id | grep -q '<div id="app">'
+          grep -qi "connect-src 'self' http://192.168.1.96:8081" spa.txt
+          test "$(docker exec web id -u)" != "0"
+          echo "--- rejects unsafe API_BASE_URL"
+          if docker run --rm -e 'API_BASE_URL=http://x/";alert(1)//' healthhub-web:ci nginx -t; then exit 1; fi
+
+      - name: Container logs
+        if: always()
+        run: docker logs web || true

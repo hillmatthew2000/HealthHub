@@ -79,7 +79,7 @@ docker run -p 8080:8080 healthcare-api
 ### Health Check
 
 ```bash
-curl http://localhost:8080/api/v1/health
+curl http://localhost:8080/health/ready
 ```
 
 ## 📁 Project Structure
@@ -235,7 +235,7 @@ kubectl logs -f deployment/healthcare-api -n healthcare-api
 3. **Access the API**:
 ```bash
 kubectl port-forward svc/healthcare-api 8080:80 -n healthcare-api
-curl http://localhost:8080/api/v1/health
+curl http://localhost:8080/health/ready
 ```
 
 ### Cloud Deployment (AWS)
@@ -280,46 +280,61 @@ kubectl apply -f ../../kubernetes/
 
 ## 📖 API Documentation
 
-### Interactive Documentation
+### Documentation
 
-- **Swagger UI**: Available at `/docs` when running locally
-- **OpenAPI Spec**: Complete specification in `docs/openapi.yaml`
-- **Comprehensive Guide**: Detailed documentation in `docs/README.md`
+- **OpenAPI Spec**: `docs/openapi.yaml`
+- **Web frontend**: `web/README.md`
 
 ### Key Endpoints
 
+Health probes are served at the root. Everything else is under `/api/v1`
+and, apart from login and registration, needs an `Authorization: Bearer`
+token. Errors are RFC 9457 problem details (`application/problem+json`).
+List endpoints accept `page` and `limit` (default 20, maximum 100) and return
+`{ data, page, limit, total, totalPages }`.
+
 #### Authentication
 ```bash
-POST /api/v1/auth/register    # Register new user
-POST /api/v1/auth/login       # User login
-POST /api/v1/auth/refresh     # Refresh token
-POST /api/v1/auth/logout      # User logout
+POST /api/v1/auth/login            # Sign in; returns token, expiresAt and user
+POST /api/v1/auth/register         # Self-registration; 403 unless ALLOW_REGISTRATION=true
+POST /api/v1/auth/refresh          # Exchange a valid token for a new one
+GET  /api/v1/auth/profile          # Current user
+POST /api/v1/auth/change-password  # Body: currentPassword, newPassword (12 to 72 characters)
 ```
 
 #### Patients
 ```bash
-GET    /api/v1/patients       # List patients
-POST   /api/v1/patients       # Create patient
-GET    /api/v1/patients/{id}  # Get patient
-PUT    /api/v1/patients/{id}  # Update patient
-DELETE /api/v1/patients/{id}  # Delete patient
+GET    /api/v1/patients                   # List; filters: family, birthdate, telecom, gender, active (exact match)
+POST   /api/v1/patients                   # Create patient
+GET    /api/v1/patients/{id}              # Get patient
+PUT    /api/v1/patients/{id}              # Replace patient
+DELETE /api/v1/patients/{id}              # Delete patient and their observations
+GET    /api/v1/patients/{id}/observations # The patient's observations
 ```
 
 #### Observations
 ```bash
-GET    /api/v1/observations       # List observations
+GET    /api/v1/observations       # List; filters: patient, status, category, code, from, to
 POST   /api/v1/observations       # Create observation
 GET    /api/v1/observations/{id}  # Get observation
-PUT    /api/v1/observations/{id}  # Update observation
+PUT    /api/v1/observations/{id}  # Replace observation
 DELETE /api/v1/observations/{id}  # Delete observation
+```
+
+#### Administration (admin role)
+```bash
+GET   /api/v1/users         # List accounts
+POST  /api/v1/users         # Create an account with roles
+GET   /api/v1/users/{id}    # Get account
+PATCH /api/v1/users/{id}    # Change roles or active status
+GET   /api/v1/audit-events  # Audit trail; filters: actor, resource, resourceType, from, to
 ```
 
 #### Health Checks
 ```bash
-GET /api/v1/health        # Basic health check
-GET /api/v1/health/ready  # Readiness probe
-GET /api/v1/health/live   # Liveness probe
-GET /metrics              # Prometheus metrics
+GET /health        # Alias of /health/ready
+GET /health/ready  # Readiness probe (checks the database)
+GET /health/live   # Liveness probe
 ```
 
 ### Example API Usage

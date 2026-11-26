@@ -12,7 +12,6 @@ info:
     - Role-based access control (RBAC)
     - AES-256 encryption for sensitive data
     - Comprehensive audit logging
-    - Prometheus metrics integration
     - Health check endpoints for monitoring
     
     ## Security
@@ -22,9 +21,14 @@ info:
     ```
     
     ## Rate Limiting
-    The API implements rate limiting to prevent abuse:
-    - 100 requests per minute per IP address
-    - 1000 requests per hour per authenticated user
+    Requests are rate limited per client IP: 300 per minute for the API
+    (RATE_LIMIT_RPM) and 10 per minute for login, registration and password
+    changes (AUTH_RATE_LIMIT_RPM). Limited requests get 429.
+
+    ## Errors
+    Errors are RFC 9457 problem details (application/problem+json) with a
+    stable `code`, the `requestId`, and per-field `errors` for validation
+    failures. Health probes are served at the server root, not under /api/v1.
     
     ## Data Compliance
     This API is designed with healthcare data compliance in mind:
@@ -57,8 +61,12 @@ tags:
     description: Patient management operations
   - name: Observations
     description: Clinical observation and lab result management
+  - name: Users
+    description: Account administration (admin role)
+  - name: Audit
+    description: Audit trail of access to records (admin role)
   - name: Health
-    description: API health and monitoring endpoints
+    description: Health probes, served at the server root
 
 paths:
   # Authentication Endpoints
@@ -66,8 +74,8 @@ paths:
     post:
       tags:
         - Authentication
-      summary: User login
-      description: Authenticate a user and receive a JWT token
+      summary: Sign in
+      description: Authenticate with email and password and receive an access token.
       operationId: login
       requestBody:
         required: true
@@ -75,48 +83,40 @@ paths:
           application/json:
             schema:
               type: object
-              required:
-                - email
-                - password
+              required: [email, password]
               properties:
                 email:
                   type: string
                   format: email
-                  example: "doctor@hospital.com"
+                  maxLength: 254
                 password:
                   type: string
                   format: password
-                  example: "securePassword123"
+                  maxLength: 1024
       responses:
         '200':
-          description: Login successful
+          description: Signed in
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  access_token:
-                    type: string
-                    description: JWT access token
-                  refresh_token:
-                    type: string
-                    description: JWT refresh token
-                  expires_in:
-                    type: integer
-                    description: Token expiration time in seconds
-                  user:
-                    $ref: '#/components/schemas/User'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
+                $ref: '#/components/schemas/AuthResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
 
   /auth/register:
     post:
       tags:
         - Authentication
-      summary: User registration
-      description: Register a new user account
+      summary: Self-registration
+      description: |
+        Create an account with no roles. Disabled unless the server runs with
+        ALLOW_REGISTRATION=true; an administrator must then grant roles.
       operationId: register
       requestBody:
         required: true
@@ -124,92 +124,115 @@ paths:
           application/json:
             schema:
               type: object
-              required:
-                - email
-                - password
-                - first_name
-                - last_name
-                - role
+              required: [email, password, firstName, lastName]
               properties:
                 email:
                   type: string
                   format: email
-                  example: "nurse@hospital.com"
+                  maxLength: 254
                 password:
                   type: string
                   format: password
-                  minLength: 8
-                  example: "securePassword123"
-                first_name:
+                  minLength: 12
+                  maxLength: 72
+                firstName:
                   type: string
-                  example: "Jane"
-                last_name:
+                  maxLength: 100
+                lastName:
                   type: string
-                  example: "Smith"
-                role:
-                  type: string
-                  enum: [doctor, nurse, admin, patient]
-                  example: "nurse"
+                  maxLength: 100
       responses:
         '201':
-          description: User created successfully
+          description: Account created
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/User'
-        '400':
-          $ref: '#/components/responses/BadRequest'
+                $ref: '#/components/schemas/AuthResponse'
+        '403':
+          description: Self-registration is disabled (code registration_disabled)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
         '409':
-          description: User already exists
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
 
   /auth/refresh:
     post:
       tags:
         - Authentication
-      summary: Refresh access token
-      description: Get a new access token using a refresh token
+      summary: Refresh the access token
+      description: |
+        Exchange a valid access token for a new one. The account is re-read, so
+        role changes and deactivation take effect. There is no request body.
       operationId: refreshToken
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: New token issued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /auth/profile:
+    get:
+      tags:
+        - Authentication
+      summary: Current user
+      operationId: getProfile
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: The signed-in user's profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /auth/change-password:
+    post:
+      tags:
+        - Authentication
+      summary: Change password
+      operationId: changePassword
+      security:
+        - BearerAuth: []
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required:
-                - refresh_token
+              required: [currentPassword, newPassword]
               properties:
-                refresh_token:
+                currentPassword:
                   type: string
-                  description: Valid refresh token
+                  format: password
+                  maxLength: 1024
+                newPassword:
+                  type: string
+                  format: password
+                  minLength: 12
+                  maxLength: 72
+                  description: 12 to 72 characters and at most 72 bytes (bcrypt limit).
       responses:
-        '200':
-          description: Token refreshed successfully
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  access_token:
-                    type: string
-                  expires_in:
-                    type: integer
+        '204':
+          description: Password changed
         '401':
           $ref: '#/components/responses/Unauthorized'
-
-  /auth/logout:
-    post:
-      tags:
-        - Authentication
-      summary: User logout
-      description: Invalidate the current access token
-      operationId: logout
-      security:
-        - BearerAuth: []
-      responses:
-        '200':
-          description: Logout successful
-        '401':
-          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
 
   # Patient Endpoints
   /patients:
@@ -237,43 +260,44 @@ paths:
             minimum: 1
             maximum: 100
             default: 20
-        - name: search
+        - name: family
           in: query
-          description: Search term for patient name or identifier
+          description: Family name, exact match ignoring case and spacing. There is no free-text search; names are stored encrypted.
+          schema:
+            type: string
+        - name: birthdate
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: telecom
+          in: query
+          description: Phone number or email address, exact match
           schema:
             type: string
         - name: gender
           in: query
-          description: Filter by patient gender
           schema:
             type: string
             enum: [male, female, other, unknown]
-        - name: birth_date_from
+        - name: active
           in: query
-          description: Filter patients born after this date
           schema:
-            type: string
-            format: date
-        - name: birth_date_to
-          in: query
-          description: Filter patients born before this date
-          schema:
-            type: string
-            format: date
+            type: boolean
       responses:
         '200':
           description: Patients retrieved successfully
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  data:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/Patient'
-                  pagination:
-                    $ref: '#/components/schemas/Pagination'
+                allOf:
+                  - $ref: '#/components/schemas/Page'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/Patient'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -428,54 +452,31 @@ paths:
             minimum: 1
             maximum: 100
             default: 20
-        - name: patient_id
+        - name: patient
           in: query
-          description: Filter observations by patient ID
+          description: Patient ID
           schema:
             type: string
             format: uuid
-        - name: code
-          in: query
-          description: Filter by observation code
-          schema:
-            type: string
-        - name: category
-          in: query
-          description: Filter by observation category
-          schema:
-            type: string
-        - name: status
-          in: query
-          description: Filter by observation status
-          schema:
-            type: string
-            enum: [registered, preliminary, final, amended, corrected, cancelled, entered-in-error, unknown]
-        - name: effective_date_from
-          in: query
-          description: Filter observations after this date
-          schema:
-            type: string
-            format: date-time
-        - name: effective_date_to
-          in: query
-          description: Filter observations before this date
-          schema:
-            type: string
-            format: date-time
+        - $ref: '#/components/parameters/ObservationCode'
+        - $ref: '#/components/parameters/ObservationCategory'
+        - $ref: '#/components/parameters/ObservationStatus'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
       responses:
         '200':
           description: Observations retrieved successfully
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  data:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/Observation'
-                  pagination:
-                    $ref: '#/components/schemas/Pagination'
+                allOf:
+                  - $ref: '#/components/schemas/Page'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/Observation'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -604,72 +605,322 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
 
-  # Health Check Endpoints
+  /patients/{id}/observations:
+    get:
+      tags:
+        - Observations
+      summary: Get a patient's observations
+      description: Same filters and paging as GET /observations, scoped to one patient. Newest first.
+      operationId: getPatientObservations
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/ObservationStatus'
+        - $ref: '#/components/parameters/ObservationCategory'
+        - $ref: '#/components/parameters/ObservationCode'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+      responses:
+        '200':
+          description: One page of observations
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Page'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/Observation'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # Administration (admin role)
+  /users:
+    get:
+      tags:
+        - Users
+      summary: List accounts
+      description: Accounts sorted by email. Admin only.
+      operationId: getUsers
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: One page of accounts
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Page'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags:
+        - Users
+      summary: Create an account
+      operationId: createUser
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password, firstName, lastName]
+              properties:
+                email:
+                  type: string
+                  format: email
+                  maxLength: 254
+                password:
+                  type: string
+                  format: password
+                  minLength: 12
+                  maxLength: 72
+                firstName:
+                  type: string
+                  maxLength: 100
+                lastName:
+                  type: string
+                  maxLength: 100
+                roles:
+                  type: array
+                  maxItems: 4
+                  items:
+                    $ref: '#/components/schemas/Role'
+      responses:
+        '201':
+          description: Account created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+
+  /users/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      tags:
+        - Users
+      summary: Get an account
+      operationId: getUser
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: The account
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags:
+        - Users
+      summary: Change roles or active status
+      description: |
+        Set roles, active, or both. Changes apply to new tokens. A change that
+        would leave no active administrator is refused with 409.
+      operationId: updateUser
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                roles:
+                  type: array
+                  maxItems: 4
+                  items:
+                    $ref: '#/components/schemas/Role'
+                active:
+                  type: boolean
+      responses:
+        '200':
+          description: Updated account
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+
+  /audit-events:
+    get:
+      tags:
+        - Audit
+      summary: Audit trail
+      description: Who accessed or changed which records, newest first. Holds record IDs, never PHI. Admin only.
+      operationId: getAuditEvents
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+        - name: actor
+          in: query
+          description: User ID of the actor
+          schema:
+            type: string
+            format: uuid
+        - name: resource
+          in: query
+          description: ID of an affected record
+          schema:
+            type: string
+            format: uuid
+        - name: resourceType
+          in: query
+          schema:
+            type: string
+            enum: [patient, observation, user]
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+      responses:
+        '200':
+          description: One page of audit events
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Page'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/AuditEvent'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  # Health probes are served at the server root, not under /api/v1.
   /health:
+    servers:
+      - url: http://localhost:8080
+        description: Health probes live at the root
     get:
       tags:
         - Health
-      summary: Basic health check
-      description: Check if the API is running
+      summary: Readiness check (alias of /health/ready)
       operationId: healthCheck
       responses:
         '200':
-          description: API is healthy
+          description: Ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthStatus'
+        '503':
+          description: Not ready
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/HealthStatus'
 
   /health/ready:
+    servers:
+      - url: http://localhost:8080
+        description: Health probes live at the root
     get:
       tags:
         - Health
       summary: Readiness check
-      description: Check if the API is ready to serve requests (includes database connectivity)
+      description: Checks that the database is reachable.
       operationId: readinessCheck
       responses:
         '200':
-          description: API is ready
+          description: Ready
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/HealthStatus'
         '503':
-          description: API is not ready
+          description: Not ready
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/HealthStatus'
 
   /health/live:
+    servers:
+      - url: http://localhost:8080
+        description: Health probes live at the root
     get:
       tags:
         - Health
       summary: Liveness check
-      description: Check if the API is alive (for Kubernetes liveness probe)
+      description: Reports that the process is serving requests; never touches dependencies.
       operationId: livenessCheck
       responses:
         '200':
-          description: API is alive
+          description: Alive
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/HealthStatus'
-
-  /metrics:
-    get:
-      tags:
-        - Health
-      summary: Prometheus metrics
-      description: Get Prometheus metrics for monitoring
-      operationId: getMetrics
-      responses:
-        '200':
-          description: Metrics retrieved successfully
-          content:
-            text/plain:
-              schema:
-                type: string
 
 components:
   securitySchemes:
@@ -678,37 +929,171 @@ components:
       scheme: bearer
       bearerFormat: JWT
 
+  parameters:
+    Page:
+      name: page
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+    Limit:
+      name: limit
+      in: query
+      description: Page size. The server default is 20 and the maximum 100 (DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE).
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    ObservationStatus:
+      name: status
+      in: query
+      schema:
+        type: string
+        enum: [registered, preliminary, final, amended, corrected, cancelled, entered-in-error, unknown]
+    ObservationCategory:
+      name: category
+      in: query
+      description: Category code such as laboratory or vital-signs
+      schema:
+        type: string
+    ObservationCode:
+      name: code
+      in: query
+      description: Exact code, either bare (8867-4) or system|code
+      schema:
+        type: string
+    From:
+      name: from
+      in: query
+      description: RFC 3339 timestamp or YYYY-MM-DD (start of that day, UTC)
+      schema:
+        type: string
+    To:
+      name: to
+      in: query
+      description: RFC 3339 timestamp or YYYY-MM-DD (end of that day, UTC)
+      schema:
+        type: string
+
   schemas:
+    Role:
+      type: string
+      enum: [admin, practitioner, nurse, lab-tech]
+
     User:
       type: object
       properties:
         id:
           type: string
           format: uuid
-          description: User ID
         email:
           type: string
           format: email
-          description: User email address
-        first_name:
+        firstName:
           type: string
-          description: User's first name
-        last_name:
+        lastName:
           type: string
-          description: User's last name
         roles:
           type: array
           items:
+            $ref: '#/components/schemas/Role'
+        active:
+          type: boolean
+        lastLoginAt:
+          type: string
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+
+    AuthResponse:
+      type: object
+      properties:
+        token:
+          type: string
+          description: Bearer access token (JWT). Valid for JWT_TTL, one hour by default.
+        expiresAt:
+          type: string
+          format: date-time
+        user:
+          $ref: '#/components/schemas/User'
+
+    AuditEvent:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        occurredAt:
+          type: string
+          format: date-time
+        actorId:
+          type: string
+          format: uuid
+        action:
+          type: string
+          enum: [create, read, list, update, delete]
+        resourceType:
+          type: string
+          enum: [patient, observation, user]
+        resourceIds:
+          type: array
+          items:
             type: string
-          description: User's assigned roles
-        created_at:
+        requestId:
           type: string
-          format: date-time
-          description: User creation timestamp
-        updated_at:
+        clientIp:
           type: string
-          format: date-time
-          description: User last update timestamp
+
+    Page:
+      type: object
+      properties:
+        data:
+          type: array
+          items: {}
+        page:
+          type: integer
+        limit:
+          type: integer
+        total:
+          type: integer
+        totalPages:
+          type: integer
+
+    Problem:
+      type: object
+      description: RFC 9457 problem details, served as application/problem+json.
+      properties:
+        type:
+          type: string
+          example: about:blank
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+        instance:
+          type: string
+        code:
+          type: string
+          description: Stable machine readable error code
+          example: validation_failed
+        requestId:
+          type: string
+        errors:
+          type: array
+          items:
+            type: object
+            properties:
+              field:
+                type: string
+                example: name[0].family
+              message:
+                type: string
+                example: is required
 
     Patient:
       type: object
@@ -1272,115 +1657,79 @@ components:
       properties:
         status:
           type: string
-          enum: [healthy, ready, alive, degraded, unhealthy]
-          description: Overall health status
-        timestamp:
-          type: string
-          format: date-time
-          description: When the health check was performed
+          enum: [ready, not ready, alive]
         version:
           type: string
-          description: API version
         checks:
           type: object
-          additionalProperties: true
-          description: Detailed health check results
-
-    Pagination:
-      type: object
-      properties:
-        page:
-          type: integer
-          description: Current page number
-        limit:
-          type: integer
-          description: Items per page
-        total:
-          type: integer
-          description: Total number of items
-        total_pages:
-          type: integer
-          description: Total number of pages
-        has_next:
-          type: boolean
-          description: Whether there is a next page
-        has_prev:
-          type: boolean
-          description: Whether there is a previous page
-
-    Error:
-      type: object
-      properties:
-        error:
-          type: string
-          description: Error type
-        message:
-          type: string
-          description: Human-readable error message
-        details:
-          type: object
-          additionalProperties: true
-          description: Additional error details
-        timestamp:
-          type: string
-          format: date-time
-          description: When the error occurred
+          additionalProperties:
+            type: string
+            enum: [up, down]
 
   responses:
     BadRequest:
-      description: Bad request
+      description: Malformed request or query parameters (code invalid_request)
       content:
-        application/json:
+        application/problem+json:
           schema:
-            $ref: '#/components/schemas/Error'
+            $ref: '#/components/schemas/Problem'
+
+    ValidationFailed:
+      description: One or more fields are invalid (code validation_failed)
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
           example:
-            error: "validation_error"
-            message: "Invalid input data"
-            details:
-              field: "email"
-              issue: "Invalid email format"
-            timestamp: "2024-01-15T10:30:00Z"
+            type: about:blank
+            title: Unprocessable Entity
+            status: 422
+            detail: One or more fields are invalid.
+            instance: /api/v1/patients
+            code: validation_failed
+            requestId: 6f1c2f9e-6a3e-4f0e-9b8a-2d2f3f0c1a11
+            errors:
+              - field: name[0].family
+                message: is required
 
     Unauthorized:
-      description: Unauthorized
+      description: Missing, invalid or expired token, or wrong credentials
       content:
-        application/json:
+        application/problem+json:
           schema:
-            $ref: '#/components/schemas/Error'
-          example:
-            error: "unauthorized"
-            message: "Invalid or missing authentication token"
-            timestamp: "2024-01-15T10:30:00Z"
+            $ref: '#/components/schemas/Problem'
 
     Forbidden:
-      description: Forbidden
+      description: The caller's roles do not allow this action (code forbidden)
       content:
-        application/json:
+        application/problem+json:
           schema:
-            $ref: '#/components/schemas/Error'
-          example:
-            error: "forbidden"
-            message: "Insufficient permissions to access this resource"
-            timestamp: "2024-01-15T10:30:00Z"
+            $ref: '#/components/schemas/Problem'
 
     NotFound:
-      description: Resource not found
+      description: Resource not found (code not_found)
       content:
-        application/json:
+        application/problem+json:
           schema:
-            $ref: '#/components/schemas/Error'
-          example:
-            error: "not_found"
-            message: "The requested resource was not found"
-            timestamp: "2024-01-15T10:30:00Z"
+            $ref: '#/components/schemas/Problem'
+
+    Conflict:
+      description: Conflicts with an existing record or state (code conflict)
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+
+    TooManyRequests:
+      description: Rate limited (code rate_limited)
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
 
     InternalServerError:
-      description: Internal server error
+      description: Unexpected server error (code internal_error); quote the requestId
       content:
-        application/json:
+        application/problem+json:
           schema:
-            $ref: '#/components/schemas/Error'
-          example:
-            error: "internal_error"
-            message: "An internal server error occurred"
-            timestamp: "2024-01-15T10:30:00Z"
+            $ref: '#/components/schemas/Problem'
